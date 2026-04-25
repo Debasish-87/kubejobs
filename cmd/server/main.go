@@ -99,8 +99,6 @@ func isQueueOverloaded(ctx context.Context) bool {
 
 func createJob(w http.ResponseWriter, r *http.Request) {
 
-	// ---------------- BASIC GUARDS ----------------
-
 	if !allowRequest() {
 		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 		return
@@ -119,24 +117,16 @@ func createJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ---------------- JOB CREATION ----------------
-
-	jobID := fmt.Sprintf("job_%d", time.Now().UnixNano())
-
 	newJob := job.Job{
-		ID:        jobID,
+		ID:        fmt.Sprintf("job_%d", time.Now().UnixNano()),
 		Status:    "PENDING",
 		CreatedAt: time.Now().Unix(),
 	}
 
-	jobKey := "job_data:" + jobID
-
-	start := time.Now()
-
-	// ---------------- STORE METADATA ----------------
+	jobKey := "job_data:" + newJob.ID
 
 	err := redis.RDB.HSet(ctx, jobKey, map[string]interface{}{
-		"id":          jobID,
+		"id":          newJob.ID,
 		"status":      newJob.Status,
 		"created_at":  newJob.CreatedAt,
 		"started_at":  0,
@@ -145,38 +135,25 @@ func createJob(w http.ResponseWriter, r *http.Request) {
 	}).Err()
 
 	if err != nil {
-		log.Printf("event=job_store_failed job_id=%s err=%v", jobID, err)
+		log.Println("event=job_store_failed err=", err)
 		writeError(w, 500, "failed to store job")
 		return
 	}
 
-	// ---------------- ENQUEUE ----------------
-
-	_, err = redis.RDB.XAdd(ctx, &redisClient.XAddArgs{
+	err = redis.RDB.XAdd(ctx, &redisClient.XAddArgs{
 		Stream: streamName,
-		ID:     "*", // MUST for uniqueness
 		Values: map[string]interface{}{
-			"job_id": jobID,
+			"job_id": newJob.ID,
 		},
-	}).Result()
+	}).Err()
 
 	if err != nil {
-		log.Printf("event=job_enqueue_failed job_id=%s err=%v", jobID, err)
+		log.Println("event=job_enqueue_failed err=", err)
 		writeError(w, 500, "failed to enqueue job")
 		return
 	}
 
-	// ---------------- METRICS / LOGGING ----------------
-
-	latency := time.Since(start).Milliseconds()
-
-	log.Printf(
-		"event=job_created job_id=%s latency_ms=%d",
-		jobID,
-		latency,
-	)
-
-	// ---------------- RESPONSE ----------------
+	log.Printf("event=job_created id=%s", newJob.ID)
 
 	writeJSON(w, 200, newJob)
 }

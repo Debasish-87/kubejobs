@@ -20,7 +20,7 @@ const (
 	streamName      = "jobs_stream"
 	groupName       = "workers"
 	retryZSet       = "jobs_retry_zset"
-	concurrency     = 20
+	concurrency     = 5
 	blockTimeout    = 5 * time.Second
 	lockTTL         = 2 * time.Minute
 	retryScanPeriod = 2 * time.Second
@@ -147,16 +147,6 @@ func retryScheduler(ctx context.Context) {
 	}
 }
 
-func heavyWork() {
-	start := time.Now()
-
-	for time.Since(start) < 5*time.Second {
-		for i := 0; i < 500000; i++ {
-			_ = math.Sqrt(rand.Float64())
-		}
-	}
-}
-
 // ---------------- PROCESS ----------------
 
 func processJob(ctx context.Context, msgID string, values map[string]interface{}) {
@@ -169,13 +159,13 @@ func processJob(ctx context.Context, msgID string, values map[string]interface{}
 
 	jobIDRaw, ok := values["job_id"]
 	if !ok {
-		log.Printf("event=invalid_message_missing_job_id msg_id=%s", msgID)
+		redis.RDB.XAck(ctx, streamName, groupName, msgID)
 		return
 	}
 
 	jobID, ok := jobIDRaw.(string)
 	if !ok {
-		log.Printf("event=invalid_message_type msg_id=%s", msgID)
+		redis.RDB.XAck(ctx, streamName, groupName, msgID)
 		return
 	}
 
@@ -214,8 +204,12 @@ func processJob(ctx context.Context, msgID string, values map[string]interface{}
 
 	log.Printf("event=job_started id=%s worker=%s", jobID, config.C.WorkerID)
 
-	heavyWork()
-	time.Sleep(5 * time.Second)
+	select {
+	case <-jobCtx.Done():
+		log.Printf("event=job_timeout id=%s", jobID)
+		return
+	case <-time.After(time.Duration(5+rand.Intn(5)) * time.Second):
+	}
 
 	duration := time.Since(start)
 	failed := rand.Float32() < 0.2
@@ -223,6 +217,7 @@ func processJob(ctx context.Context, msgID string, values map[string]interface{}
 	if failed {
 
 		metrics.JobsFailed.WithLabelValues(config.C.WorkerID, "retry").Inc()
+		metrics.JobsFailed.WithLabelValues(config.C.WorkerID, "dlq").Inc()
 
 		retry, _ := redis.RDB.HIncrBy(jobCtx, jobKey, "retry_count", 1).Result()
 
@@ -271,35 +266,6 @@ func processJob(ctx context.Context, msgID string, values map[string]interface{}
 
 func workerLoop(ctx context.Context, consumerName string, sem chan struct{}) {
 
-	go func() {
-		for {
-			msgs, _, err := redis.RDB.XAutoClaim(ctx, &redisClient.XAutoClaimArgs{
-				Stream:   streamName,
-				Group:    groupName,
-				Consumer: consumerName,
-				MinIdle:  30 * time.Second,
-				Start:    "0",
-				Count:    50,
-			}).Result()
-
-			if err != nil && err != redisClient.Nil {
-				log.Printf("event=autoclaim_error err=%v", err)
-				time.Sleep(2 * time.Second)
-				continue
-			}
-
-			if len(msgs) == 0 {
-				break
-			}
-
-			for _, msg := range msgs {
-				sem <- struct{}{}
-
-				go handleMessage(ctx, consumerName, msg, sem)
-			}
-		}
-	}()
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -311,14 +277,11 @@ func workerLoop(ctx context.Context, consumerName string, sem chan struct{}) {
 			Group:    groupName,
 			Consumer: consumerName,
 			Streams:  []string{streamName, ">"},
-			Count:    10,
-			Block:    5 * time.Second,
+			Count:    1,
+			Block:    blockTimeout,
 		}).Result()
 
 		if err != nil {
-			if err == redisClient.Nil || strings.Contains(err.Error(), "redis: nil") {
-				continue
-			}
 			if ctx.Err() != nil {
 				return
 			}
@@ -328,77 +291,22 @@ func workerLoop(ctx context.Context, consumerName string, sem chan struct{}) {
 
 		for _, stream := range streams {
 			for _, msg := range stream.Messages {
+
 				sem <- struct{}{}
 
-				go handleMessage(ctx, consumerName, msg, sem)
+				go func(mID string, values map[string]interface{}) {
+
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("event=worker_panic msg_id=%s err=%v", mID, r)
+						}
+						<-sem
+					}()
+
+					processJob(ctx, mID, values)
+
+				}(msg.ID, msg.Values)
 			}
-		}
-	}
-}
-
-func handleMessage(ctx context.Context, consumerName string, msg redisClient.XMessage, sem chan struct{}) {
-
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("event=worker_panic msg_id=%s err=%v", msg.ID, r)
-		}
-		<-sem
-	}()
-
-	processJob(ctx, msg.ID, msg.Values)
-
-	err := redis.RDB.XAck(ctx, streamName, groupName, msg.ID).Err()
-	if err != nil {
-		log.Printf("event=xack_failed msg_id=%s err=%v", msg.ID, err)
-	}
-}
-
-func recoverPending(ctx context.Context, consumerName string, sem chan struct{}) {
-
-	for {
-		msgs, _, err := redis.RDB.XAutoClaim(ctx, &redisClient.XAutoClaimArgs{
-			Stream:   streamName,
-			Group:    groupName,
-			Consumer: consumerName,
-			MinIdle:  30 * time.Second,
-			Start:    "0",
-			Count:    50,
-		}).Result()
-
-		if err != nil {
-			if err == redisClient.Nil {
-				break
-			}
-			log.Printf("event=autoclaim_error consumer=%s err=%v", consumerName, err)
-			time.Sleep(2 * time.Second)
-			continue
-		}
-
-		if len(msgs) == 0 {
-			break
-		}
-
-		for _, msg := range msgs {
-
-			sem <- struct{}{}
-
-			go func(m redisClient.XMessage) {
-
-				defer func() {
-					if r := recover(); r != nil {
-						log.Printf("event=recover_pending_panic msg_id=%s err=%v", m.ID, r)
-					}
-					<-sem
-				}()
-
-				processJob(ctx, m.ID, m.Values)
-
-				err := redis.RDB.XAck(ctx, streamName, groupName, m.ID).Err()
-				if err != nil {
-					log.Printf("event=xack_failed msg_id=%s err=%v", m.ID, err)
-				}
-
-			}(msg)
 		}
 	}
 }
@@ -424,33 +332,13 @@ func StartWorker(ctx context.Context) {
 		retryScheduler(ctx)
 	}()
 
+	consumerName := config.C.WorkerID
+
 	for i := 0; i < concurrency; i++ {
-
-		consumerName := fmt.Sprintf("%s-%d", config.C.WorkerID, i)
-
-		go func(name string) {
-
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("event=worker_loop_panic consumer=%s err=%v", name, r)
-				}
-			}()
-
-			recoverPending(ctx, name, sem)
-
-			workerLoop(ctx, name, sem)
-
-		}(consumerName)
+		go workerLoop(ctx, consumerName, sem)
 	}
 
 	<-ctx.Done()
-
-	log.Println("event=worker_stopping draining=true")
-
-	// wait for in-flight jobs to finish
-	for i := 0; i < cap(sem); i++ {
-		sem <- struct{}{}
-	}
 
 	metrics.WorkerActive.WithLabelValues(config.C.WorkerID).Set(0)
 
