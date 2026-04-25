@@ -6,8 +6,9 @@ metadata:
 spec:
   secretTargetRef:
   - parameter: password
-    name: keda-redis-secret
+    name: redis-secret
     key: password
+
 ---
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
@@ -19,10 +20,13 @@ spec:
     name: worker
 
   minReplicaCount: 2
-  maxReplicaCount: 15
+  maxReplicaCount: 50
 
-  pollingInterval: 5
-  cooldownPeriod: 30
+  pollingInterval: 2          # fast reaction
+  cooldownPeriod: 15          # avoid aggressive scale down
+
+  advanced:
+    restoreToOriginalReplicaCount: false
 
   triggers:
   - type: redis-streams
@@ -30,6 +34,10 @@ spec:
       address: redis-0.redis.kubejobs.svc.cluster.local:6379
       stream: jobs_stream
       consumerGroup: workers
-      pendingEntriesCount: "10"
+
+      lagThreshold: "100"
+
+      activationLagThreshold: "10"
+
     authenticationRef:
       name: redis-auth

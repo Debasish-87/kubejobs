@@ -1,0 +1,2423 @@
+================================================================
+FILE: ./deployments/docker/docker-compose.yml
+================================================================
+services:
+
+  redis:
+    image: redis:7
+    command:
+      [
+        "redis-server",
+        "--appendonly", "yes",
+        "--appendfsync", "everysec",
+        "--requirepass", "kubejobs123"
+      ]
+
+    volumes:
+      - redis_data:/data
+
+    environment:
+      - REDIS_PASSWORD=kubejobs123
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "kubejobs123", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+    restart: unless-stopped
+
+    networks:
+      - kubejobs-net
+
+  api:
+    build:
+      context: ../../
+      dockerfile: deployments/docker/Dockerfile
+
+    ports:
+      - "8080:8080"
+
+    environment:
+      - REDIS_ADDR=redis:6379
+      - REDIS_PASSWORD=kubejobs123
+      - APP_MODE=api
+      - MAX_QUEUE_SIZE=1000
+      - MAX_RETRY=3
+
+    depends_on:
+      redis:
+        condition: service_healthy
+
+    restart: unless-stopped
+
+    networks:
+      - kubejobs-net
+
+  worker:
+    build:
+      context: ../../
+      dockerfile: deployments/docker/Dockerfile
+
+    environment:
+      - REDIS_ADDR=redis:6379
+      - REDIS_PASSWORD=kubejobs123
+      - APP_MODE=worker
+      - MAX_RETRY=3
+      - WORKER_CONCURRENCY=10
+
+    # ❌ NO PORTS (important for scaling)
+
+    depends_on:
+      redis:
+        condition: service_healthy
+
+    restart: unless-stopped
+
+    networks:
+      - kubejobs-net
+
+  prometheus:
+    image: prom/prometheus
+
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+
+    ports:
+      - "9090:9090"
+
+    depends_on:
+      - api
+      - worker
+
+    restart: unless-stopped
+
+    networks:
+      - kubejobs-net
+
+  grafana:
+    image: grafana/grafana
+
+    ports:
+      - "3000:3000"
+
+    depends_on:
+      - prometheus
+
+    restart: unless-stopped
+
+    networks:
+      - kubejobs-net
+
+volumes:
+  redis_data:
+
+networks:
+  kubejobs-net:
+    driver: bridge-e 
+
+================================================================
+FILE: ./deployments/docker/Dockerfile
+================================================================
+# ----------- BUILD STAGE -----------
+FROM golang:1.23-alpine AS builder
+
+WORKDIR /app
+
+# install dependencies
+RUN apk add --no-cache git
+
+# better caching
+COPY go.mod go.sum ./
+RUN go mod download
+
+# copy source
+COPY . .
+
+# build optimized static binary
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -ldflags="-s -w" -o app ./cmd/server
+
+
+# ----------- RUNTIME STAGE -----------
+FROM alpine:3.20
+
+WORKDIR /app
+
+# install certs (required for HTTPS)
+RUN apk update && apk add --no-cache ca-certificates
+
+# copy binary
+COPY --from=builder /app/app .
+
+# create non-root user
+RUN adduser -D -g '' appuser
+USER appuser
+
+EXPOSE 8080
+
+# optional healthcheck (works with docker/k8s)
+HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
+  CMD wget -qO- http://localhost:8080/health || exit 1
+
+CMD ["./app"]-e 
+
+================================================================
+FILE: ./deployments/docker/prometheus.yml
+================================================================
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+
+  # ---------------- API ----------------
+  - job_name: "kubejobs-api"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8080"]
+
+  # ---------------- WORKER (AUTO DISCOVERY) ----------------
+  - job_name: "kubejobs-worker"
+    metrics_path: /metrics
+
+    dns_sd_configs:
+      - names:
+          - "worker"
+        type: "A"
+        port: 8081
+
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+
+  # ---------------- PROMETHEUS ----------------
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]-e 
+
+================================================================
+FILE: ./deployments/docker/alerts.yml
+================================================================
+groups:
+  - name: kubejobs-alerts
+    rules:
+
+      # High queue backlog
+      - alert: HighQueueBacklog
+        expr: queue_depth > 100
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Queue backlog high"
+          description: "Queue size is above 100"
+
+      # Worker down
+      - alert: WorkerDown
+        expr: worker_active == 0
+        for: 15s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Worker is down"
+
+      # Job failure spike
+      - alert: HighJobFailureRate
+        expr: rate(jobs_failed_total[1m]) > 5
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "High job failure rate"-e 
+
+================================================================
+FILE: ./deployments/kubernetes/resource-quota.yaml
+================================================================
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: kubejobs-quota
+  namespace: kubejobs
+spec:
+  hard:
+    requests.cpu: "2"
+    requests.memory: 2Gi
+    limits.cpu: "4"
+    limits.memory: 4Gi
+    pods: "20"-e 
+
+================================================================
+FILE: ./deployments/kubernetes/service.yaml
+================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: kubejobs
+  labels:
+    app: api
+    component: backend
+spec:
+  type: NodePort
+
+  selector:
+    app: api
+
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080-e 
+
+================================================================
+FILE: ./deployments/kubernetes/redis-secret.yaml
+================================================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: redis-secret
+  namespace: kubejobs
+type: Opaque
+stringData:
+  password: "kubejobs123"-e 
+
+================================================================
+FILE: ./deployments/kubernetes/redis-service.yaml
+================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: kubejobs
+  labels:
+    app: redis
+
+spec:
+  clusterIP: None
+
+  selector:
+    app: redis
+
+  ports:
+    - port: 6379
+      targetPort: 6379-e 
+
+================================================================
+FILE: ./deployments/kubernetes/limit-range.yaml
+================================================================
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: kubejobs-limits
+  namespace: kubejobs
+spec:
+  limits:
+  - type: Container
+    default:
+      cpu: "500m"
+      memory: "512Mi"
+    defaultRequest:
+      cpu: "100m"
+      memory: "128Mi"-e 
+
+================================================================
+FILE: ./deployments/kubernetes/namespace.yaml
+================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubejobs
+
+  labels:
+    name: kubejobs
+    environment: production
+    app.kubernetes.io/name: kubejobs
+    app.kubernetes.io/part-of: job-system
+    app.kubernetes.io/managed-by: kubectl
+
+  annotations:
+    description: "KubeJobs distributed job processing system namespace"-e 
+
+================================================================
+FILE: ./deployments/kubernetes/hpa-worker.yaml
+================================================================
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: worker-hpa
+  namespace: kubejobs
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: worker
+
+  minReplicas: 2
+  maxReplicas: 15
+
+  # multiple metrics (better signal)
+  metrics:
+
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 60
+
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 70
+
+  # scaling behavior tuning (VERY IMPORTANT)
+  behavior:
+
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 30
+      - type: Pods
+        value: 4
+        periodSeconds: 30
+      selectPolicy: Max
+
+    scaleDown:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+      selectPolicy: Max-e 
+
+================================================================
+FILE: ./deployments/kubernetes/worker-deployment.yaml
+================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: kubejobs
+  labels:
+    app: worker
+
+spec:
+  replicas: 3
+  revisionHistoryLimit: 3
+
+  selector:
+    matchLabels:
+      app: worker
+
+  template:
+    metadata:
+      labels:
+        app: worker
+
+    spec:
+      terminationGracePeriodSeconds: 15
+
+      containers:
+      - name: worker
+        image: kubejobs:latest
+        imagePullPolicy: IfNotPresent
+
+        env:
+        - name: APP_MODE
+          value: "worker"
+
+        - name: REDIS_ADDR
+          value: "redis:6379"
+
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-secret
+              key: password
+
+        - name: MAX_RETRY
+          value: "3"
+
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+
+        livenessProbe:
+          exec:
+            command: ["sh", "-c", "echo ok"]
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          failureThreshold: 3
+
+        readinessProbe:
+          exec:
+            command: ["sh", "-c", "echo ready"]
+          initialDelaySeconds: 5
+          periodSeconds: 10
+
+        lifecycle:
+          preStop:
+            exec:
+              command: ["sh", "-c", "sleep 5"]
+
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+
+      securityContext:
+        fsGroup: 1000-e 
+
+================================================================
+FILE: ./deployments/kubernetes/keda-scaledobject.yaml
+================================================================
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: redis-auth
+  namespace: kubejobs
+spec:
+  secretTargetRef:
+  - parameter: password
+    name: redis-secret
+    key: password
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-scaler
+  namespace: kubejobs
+spec:
+  scaleTargetRef:
+    name: worker
+
+  minReplicaCount: 2
+  maxReplicaCount: 15
+
+  pollingInterval: 2
+  cooldownPeriod: 10
+
+  triggers:
+  - type: redis-streams
+    metadata:
+      address: redis.kubejobs.svc.cluster.local:6379
+      stream: jobs_stream
+      consumerGroup: workers
+      pendingEntriesCount: "1"
+    authenticationRef:
+      name: redis-auth-e 
+
+================================================================
+FILE: ./deployments/kubernetes/redis-statefulset.yaml
+================================================================
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: kubejobs
+  labels:
+    app: redis
+
+spec:
+  serviceName: redis
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: redis
+
+  template:
+    metadata:
+      labels:
+        app: redis
+
+    spec:
+      terminationGracePeriodSeconds: 20
+
+      containers:
+      - name: redis
+        image: redis:7
+        imagePullPolicy: IfNotPresent
+
+        ports:
+        - containerPort: 6379
+
+        args:
+          - "redis-server"
+          - "--appendonly"
+          - "yes"
+          - "--appendfsync"
+          - "everysec"
+          - "--requirepass"
+          - "$(REDIS_PASSWORD)"
+
+        env:
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-secret
+              key: password
+
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data
+
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+
+        readinessProbe:
+          exec:
+            command:
+              - sh
+              - -c
+              - redis-cli -a $REDIS_PASSWORD ping
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 2
+
+        livenessProbe:
+          exec:
+            command:
+              - sh
+              - -c
+              - redis-cli -a $REDIS_PASSWORD ping
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 2
+
+        securityContext:
+          allowPrivilegeEscalation: false
+
+  volumeClaimTemplates:
+  - metadata:
+      name: redis-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 1Gi-e 
+
+================================================================
+FILE: ./deployments/kubernetes/redis-pdb.yaml
+================================================================
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redis-pdb
+  namespace: kubejobs
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: redis-e 
+
+================================================================
+FILE: ./deployments/kubernetes/api-deployment.yaml
+================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: kubejobs
+  labels:
+    app: api
+
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+
+  selector:
+    matchLabels:
+      app: api
+
+  template:
+    metadata:
+      labels:
+        app: api
+
+    spec:
+      terminationGracePeriodSeconds: 10
+
+      containers:
+      - name: api
+        image: kubejobs:latest
+        imagePullPolicy: IfNotPresent
+
+        ports:
+        - containerPort: 8080
+
+        env:
+        - name: APP_MODE
+          value: "api"
+
+        - name: REDIS_ADDR
+          value: "redis:6379"
+
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-secret
+              key: password
+
+        - name: MAX_QUEUE_SIZE
+          value: "1000"
+
+        - name: MAX_RETRY
+          value: "3"
+
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 3
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 3
+
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+
+        lifecycle:
+          preStop:
+            exec:
+              command: ["sh", "-c", "sleep 5"]
+
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+
+      securityContext:
+        fsGroup: 1000-e 
+
+================================================================
+FILE: ./README.md
+================================================================
+# KubeJobs — Kubernetes-based Distributed Job Processing System
+
+## Overview
+
+KubeJobs is a fault-tolerant distributed job processing system built using Go and Redis Streams.
+
+It supports asynchronous background job execution with strong guarantees around:
+
+* retry handling
+* failure recovery
+* idempotent processing
+* queue-based scaling
+
+The system is designed to simulate real-world distributed workloads and demonstrate infrastructure-level thinking.
+
+---
+
+## System Evolution
+
+### v1 — Docker-based System
+
+* Containerized services using Docker Compose
+* Custom autoscaler based on queue depth
+* Prometheus + Grafana for observability
+
+### v2 — Kubernetes-based System
+
+* API and Worker deployed as Kubernetes Deployments
+* Redis deployed using StatefulSet with persistent storage
+* Horizontal Pod Autoscaler (HPA)
+* KEDA-based queue-driven autoscaling
+* ResourceQuota and LimitRange for resource control
+* Liveness and Readiness probes
+
+---
+
+## Architecture
+
+```
+Client (API)
+   ↓
+Redis Streams (Job Queue)
+   ↓
+Worker Pool (Consumer Group)
+   ↓
+Processing
+   ↓
+ ├── Success → Completed
+ ├── Failure → Retry (ZSET with backoff)
+ └── Max Retry → Dead Letter Queue (DLQ)
+
+Recovery System:
+Pending Jobs → XCLAIM → Reprocess
+```
+
+---
+
+## Core Features
+
+### Job Processing
+
+* Redis Streams-based queue
+* Consumer group worker model
+* Concurrent job execution
+* Idempotent processing using locks
+
+### Reliability
+
+* Retry with exponential backoff
+* Dead Letter Queue (DLQ)
+* Recovery of stuck jobs using XCLAIM
+* Graceful worker shutdown
+
+### Observability
+
+* Prometheus metrics
+* Job processing latency histogram
+* Queue depth tracking
+* Worker health metrics
+
+### Autoscaling
+
+#### Docker (v1)
+
+* Custom autoscaler script based on queue size
+
+#### Kubernetes (v2)
+
+* HPA (CPU + Memory based scaling)
+* KEDA (Redis Streams queue-based scaling)
+
+---
+
+## Tech Stack
+
+* Go (Golang)
+* Redis (Streams + ZSET + Hash)
+* Docker & Docker Compose
+* Kubernetes
+* Prometheus
+* Grafana
+* KEDA
+
+---
+
+## Project Structure
+
+```
+cmd/server           → application entrypoint  
+internal/            → core logic (worker, redis, recovery, metrics)  
+deployments/docker   → docker-compose setup  
+deployments/kubernetes → k8s manifests (deployments, HPA, KEDA)  
+scripts/             → dev automation tools  
+```
+
+---
+
+## Running the System
+
+### Docker (v1)
+
+Start system:
+
+```
+docker compose up
+```
+
+Start with autoscaler:
+
+```
+./scripts/devctl.sh dev
+```
+
+Send load:
+
+```
+./scripts/devctl.sh test 500
+```
+
+---
+
+### Kubernetes (v2)
+
+Apply resources:
+
+```
+kubectl apply -f deployments/kubernetes/
+```
+
+Check pods:
+
+```
+kubectl get pods -n kubejobs
+```
+
+---
+
+## Scaling Behavior
+
+### Worker Scaling
+
+* HPA scales based on CPU and memory usage
+* KEDA scales based on Redis stream backlog
+
+### Example Scaling Logic (Docker autoscaler)
+
+* queue > 1000 → 20 workers
+* queue > 500 → 10 workers
+* queue > 100 → 5 workers
+* queue > 0 → 2 workers
+* idle → 1 worker
+
+---
+
+## Failure Handling
+
+The system ensures reliability through:
+
+* exponential retry scheduling using Redis ZSET
+* job state tracking in Redis Hash
+* DLQ for failed jobs
+* recovery of stuck jobs using XCLAIM
+* duplicate prevention via distributed locks
+
+---
+
+## Limitations (Current)
+
+* Redis is single-node (no HA)
+* No distributed tracing (OpenTelemetry missing)
+* No CI/CD pipeline
+* No network isolation or TLS
+* Image versioning not enforced (`latest` used in some configs)
+
+---
+
+## What This Project Demonstrates
+
+* Distributed system design using queues
+* Worker concurrency and coordination
+* Failure handling and retry strategies
+* Observability and metrics design
+* Container orchestration (Docker + Kubernetes)
+* Autoscaling strategies (HPA + KEDA)
+
+---
+
+## Next Steps (v3 — Production Infra)
+
+Planned improvements:
+
+* Redis High Availability (Sentinel / Cluster)
+* Distributed tracing (OpenTelemetry)
+* CI/CD pipeline (GitHub Actions)
+* Chaos testing (failure simulation)
+* Security hardening (Secrets, NetworkPolicy, TLS)
+
+---
+
+## License
+
+MIT License
+-e 
+
+================================================================
+FILE: ./scripts/k8sctl.sh
+================================================================
+#!/bin/bash
+
+set -e
+
+# ---------------- CONFIG ----------------
+
+NAMESPACE="kubejobs"
+K8S_DIR="deployments/kubernetes"
+
+# ---------------- DEP CHECK ----------------
+
+function check_deps() {
+for cmd in kubectl curl jq minikube; do
+command -v $cmd >/dev/null || { echo "ERROR: $cmd not installed"; exit 1; }
+done
+}
+
+function check_cluster() {
+if ! kubectl cluster-info >/dev/null 2>&1; then
+echo "ERROR: Kubernetes cluster not reachable"
+echo "Run: minikube start"
+exit 1
+fi
+}
+
+# ---------------- NETWORK DISCOVERY ----------------
+
+function get_api_url() {
+MINIKUBE_IP=$(minikube ip)
+NODE_PORT=$(kubectl get svc api -n $NAMESPACE -o jsonpath='{.spec.ports[0].nodePort}')
+
+if [ -z "$NODE_PORT" ]; then
+echo "ERROR: API service NodePort not found"
+exit 1
+fi
+
+API_URL="http://$MINIKUBE_IP:$NODE_PORT"
+echo "API URL: $API_URL"
+}
+
+# ---------------- CLEAN ----------------
+
+function cleanup() {
+echo "Cleaning previous deployment..."
+
+kubectl delete scaledobject worker-scaler -n $NAMESPACE --ignore-not-found=true
+kubectl delete hpa worker-hpa -n $NAMESPACE --ignore-not-found=true
+}
+
+# ---------------- APPLY ----------------
+
+function apply_all() {
+echo "Applying Kubernetes manifests..."
+
+kubectl apply -f $K8S_DIR/namespace.yaml
+kubectl apply -f $K8S_DIR/redis-secret.yaml
+kubectl apply -f $K8S_DIR/limit-range.yaml
+kubectl apply -f $K8S_DIR/resource-quota.yaml
+
+kubectl apply -f $K8S_DIR/redis-service.yaml
+kubectl apply -f $K8S_DIR/redis-statefulset.yaml
+kubectl apply -f $K8S_DIR/redis-pdb.yaml
+
+kubectl apply -f $K8S_DIR/api-deployment.yaml
+kubectl apply -f $K8S_DIR/service.yaml
+
+kubectl apply -f $K8S_DIR/worker-deployment.yaml
+
+kubectl apply -f $K8S_DIR/keda-scaledobject.yaml
+}
+
+# ---------------- WAIT ----------------
+
+function wait_ready() {
+echo "Waiting for pods..."
+
+kubectl wait --for=condition=ready pod -l app=redis -n $NAMESPACE --timeout=120s
+kubectl wait --for=condition=available deployment/api -n $NAMESPACE --timeout=120s
+kubectl wait --for=condition=available deployment/worker -n $NAMESPACE --timeout=120s
+
+echo "All components ready"
+}
+
+# ---------------- TEST ----------------
+
+function test_jobs() {
+COUNT=${1:-100}
+get_api_url
+
+echo "Sending $COUNT jobs..."
+
+for i in $(seq 1 $COUNT); do
+curl -s -X POST $API_URL/jobs > /dev/null &
+if [ $((i % 100)) -eq 0 ]; then sleep 0.1; fi
+done
+
+wait
+echo "Jobs injected"
+}
+
+# ---------------- VALIDATE ----------------
+
+function validate() {
+get_api_url
+
+echo "Validating system..."
+
+RESPONSE=$(curl -s $API_URL/stats)
+echo $RESPONSE | jq .
+
+QUEUE=$(echo $RESPONSE | jq '.stream_length')
+
+if [ "$QUEUE" -ge 0 ]; then
+echo "System healthy"
+else
+echo "System failed"
+exit 1
+fi
+}
+
+# ---------------- FULL SETUP ----------------
+
+function setup() {
+echo "======================================"
+echo "KubeJobs Kubernetes Setup"
+echo "======================================"
+
+check_cluster
+cleanup
+apply_all
+wait_ready
+
+echo "Running smoke test..."
+test_jobs 50
+
+sleep 5
+validate
+
+echo "======================================"
+echo "SETUP COMPLETE"
+echo "======================================"
+}
+
+# ---------------- STATUS ----------------
+
+function status() {
+kubectl get pods -n $NAMESPACE
+}
+
+function logs() {
+kubectl logs -l app=worker -n $NAMESPACE --tail=50 -f
+}
+
+function down() {
+kubectl delete namespace $NAMESPACE
+}
+
+# ---------------- ROUTER ----------------
+
+check_deps
+
+case "$1" in
+setup) setup ;;
+test) test_jobs $2 ;;
+validate) validate ;;
+status) status ;;
+logs) logs ;;
+down) down ;;
+*) echo "Usage: ./k8sctl.sh [setup|test|validate|status|logs|down]" ;;
+esac
+-e 
+
+================================================================
+FILE: ./internal/redis/redis.go
+================================================================
+package redis
+
+import (
+	"context"
+	"log"
+	"os"
+	"strconv"
+	"sync"
+	"time"
+
+	goredis "github.com/redis/go-redis/v9"
+)
+
+var RDB *goredis.Client
+var once sync.Once
+
+// ---------------- INIT ----------------
+
+func InitRedis() {
+
+	addr := getEnv("REDIS_ADDR", "localhost:6379")
+	password := getEnv("REDIS_PASSWORD", "")
+
+	poolSize := getEnvInt("REDIS_POOL_SIZE", 50)
+
+	RDB = goredis.NewClient(&goredis.Options{
+		Addr:     addr,
+		Password: password,
+
+		// timeouts
+		DialTimeout:  3 * time.Second,
+		ReadTimeout:  2 * time.Second,
+		WriteTimeout: 2 * time.Second,
+
+		// pool tuning
+		PoolSize:        poolSize,
+		MinIdleConns:    10,
+		PoolTimeout:     3 * time.Second,
+		ConnMaxIdleTime: 5 * time.Minute,
+		ConnMaxLifetime: 30 * time.Minute,
+
+		// retry strategy
+		MaxRetries:      2,
+		MinRetryBackoff: 50 * time.Millisecond,
+		MaxRetryBackoff: 500 * time.Millisecond,
+	})
+
+	// FIX: retry logic instead of fatal crash
+	var err error
+
+	for i := 0; i < 10; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+
+		err = RDB.Ping(ctx).Err()
+		cancel()
+
+		if err == nil {
+			break
+		}
+
+		log.Printf("event=redis_connect_retry attempt=%d addr=%s err=%v", i+1, addr, err)
+		time.Sleep(2 * time.Second)
+	}
+
+	// only fail after retries exhausted
+	if err != nil {
+		log.Fatalf("event=redis_connection_failed addr=%s err=%v", addr, err)
+	}
+
+	log.Printf("event=redis_connected addr=%s pool=%d", addr, poolSize)
+
+	startHealthCheck()
+}
+
+// ---------------- HEALTH CHECK ----------------
+
+func startHealthCheck() {
+	once.Do(func() {
+		go healthCheckLoop()
+	})
+}
+
+func healthCheckLoop() {
+
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		<-ticker.C
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+
+		err := RDB.Ping(ctx).Err()
+		cancel()
+
+		if err != nil {
+			log.Printf("event=redis_unhealthy err=%v", err)
+		}
+	}
+}
+
+// ---------------- SAFE CONTEXT ----------------
+
+func Ctx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 5*time.Second)
+}
+
+// ---------------- CLOSE ----------------
+
+func CloseRedis() {
+	if RDB != nil {
+		if err := RDB.Close(); err != nil {
+			log.Println("event=redis_close_error err=", err)
+		} else {
+			log.Println("event=redis_closed")
+		}
+	}
+}
+
+// ---------------- HELPERS ----------------
+
+func getEnv(key, def string) string {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	return v
+}
+
+func getEnvInt(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		log.Printf("event=config_invalid_int key=%s val=%s", key, v)
+		return def
+	}
+	return n
+}
+-e 
+
+================================================================
+FILE: ./internal/worker/worker.go
+================================================================
+package worker
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"math"
+	"math/rand"
+	"strings"
+	"time"
+
+	redisClient "github.com/redis/go-redis/v9"
+
+	"kubejobs/internal/config"
+	"kubejobs/internal/metrics"
+	"kubejobs/internal/redis"
+)
+
+const (
+	streamName      = "jobs_stream"
+	groupName       = "workers"
+	retryZSet       = "jobs_retry_zset"
+	concurrency     = 5
+	blockTimeout    = 5 * time.Second
+	lockTTL         = 2 * time.Minute
+	retryScanPeriod = 2 * time.Second
+	maxRetryBackoff = 10
+	jobTTL          = 1 * time.Hour
+)
+
+// ---------------- INIT ----------------
+
+func initConsumerGroup(ctx context.Context) {
+	err := redis.RDB.XGroupCreateMkStream(ctx, streamName, groupName, "0").Err()
+
+	if err != nil && !strings.Contains(err.Error(), "BUSYGROUP") {
+		log.Fatalf("event=consumer_group_init_failed err=%v", err)
+	}
+
+	log.Println("event=consumer_group_ready stream=jobs_stream group=workers")
+}
+
+// ---------------- LOCK ----------------
+
+func acquireLock(ctx context.Context, jobID string) bool {
+	lockKey := "job_lock:" + jobID
+
+	ok, err := redis.RDB.SetNX(ctx, lockKey, "1", lockTTL).Result()
+	if err != nil {
+		log.Printf("event=lock_error job=%s err=%v", jobID, err)
+		return false
+	}
+	return ok
+}
+
+func releaseLock(ctx context.Context, jobID string) {
+	lockKey := "job_lock:" + jobID
+	redis.RDB.Del(ctx, lockKey)
+}
+
+// ---------------- RETRY ----------------
+
+func scheduleRetry(ctx context.Context, jobID string, retry int64) {
+
+	if retry > maxRetryBackoff {
+		retry = maxRetryBackoff
+	}
+
+	base := math.Pow(2, float64(retry))
+	delay := time.Duration(base)*time.Second +
+		time.Duration(rand.Intn(1000))*time.Millisecond
+
+	retryAt := time.Now().Add(delay).Unix()
+
+	err := redis.RDB.ZAdd(ctx, retryZSet, redisClient.Z{
+		Score:  float64(retryAt),
+		Member: jobID,
+	}).Err()
+
+	if err != nil {
+		log.Printf("event=retry_schedule_failed id=%s err=%v", jobID, err)
+	}
+}
+
+// ---------------- RETRY SCHEDULER ----------------
+
+func retryScheduler(ctx context.Context) {
+
+	log.Println("event=retry_scheduler_started")
+
+	ticker := time.NewTicker(retryScanPeriod)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+
+		case <-ticker.C:
+
+			if length, err := redis.RDB.XLen(ctx, streamName).Result(); err == nil {
+				metrics.QueueDepth.WithLabelValues("jobs_stream").Set(float64(length))
+			}
+
+			now := time.Now().Unix()
+
+			jobs, err := redis.RDB.ZRangeByScore(ctx, retryZSet, &redisClient.ZRangeBy{
+				Min:   "-inf",
+				Max:   fmt.Sprintf("%d", now),
+				Count: 10,
+			}).Result()
+
+			if err != nil {
+				log.Printf("event=retry_scan_error err=%v", err)
+				continue
+			}
+
+			if len(jobs) == 0 {
+				continue
+			}
+
+			for _, jobID := range jobs {
+
+				redis.RDB.ZRem(ctx, retryZSet, jobID)
+
+				err := redis.RDB.XAdd(ctx, &redisClient.XAddArgs{
+					Stream: streamName,
+					Values: map[string]interface{}{
+						"job_id": jobID,
+					},
+				}).Err()
+
+				if err != nil {
+					log.Printf("event=retry_requeue_failed id=%s err=%v", jobID, err)
+
+					redis.RDB.ZAdd(ctx, retryZSet, redisClient.Z{
+						Score:  float64(now + 5),
+						Member: jobID,
+					})
+
+					continue
+				}
+
+				log.Printf("event=retry_requeued id=%s", jobID)
+			}
+		}
+	}
+}
+
+func heavyWork() {
+	start := time.Now()
+
+	for time.Since(start) < 5*time.Second {
+		for i := 0; i < 500000; i++ {
+			_ = math.Sqrt(rand.Float64())
+		}
+	}
+}
+
+// ---------------- PROCESS ----------------
+
+func processJob(ctx context.Context, msgID string, values map[string]interface{}) {
+
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("event=process_job_panic msg_id=%s err=%v", msgID, r)
+		}
+	}()
+
+	jobIDRaw, ok := values["job_id"]
+	if !ok {
+		redis.RDB.XAck(ctx, streamName, groupName, msgID)
+		return
+	}
+
+	jobID, ok := jobIDRaw.(string)
+	if !ok {
+		redis.RDB.XAck(ctx, streamName, groupName, msgID)
+		return
+	}
+
+	jobCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	if !acquireLock(jobCtx, jobID) {
+		redis.RDB.XAck(jobCtx, streamName, groupName, msgID)
+		return
+	}
+	defer releaseLock(jobCtx, jobID)
+
+	jobKey := "job_data:" + jobID
+
+	jobMap, err := redis.RDB.HGetAll(jobCtx, jobKey).Result()
+	if err != nil || len(jobMap) == 0 {
+		redis.RDB.XAck(jobCtx, streamName, groupName, msgID)
+		return
+	}
+
+	// strict duplicate prevention
+	if jobMap["status"] != "PENDING" {
+		redis.RDB.XAck(jobCtx, streamName, groupName, msgID)
+		return
+	}
+
+	now := time.Now().Unix()
+
+	_ = redis.RDB.HSet(jobCtx, jobKey, map[string]interface{}{
+		"status":     "RUNNING",
+		"started_at": now,
+		"worker_id":  config.C.WorkerID,
+	}).Err()
+
+	start := time.Now()
+
+	log.Printf("event=job_started id=%s worker=%s", jobID, config.C.WorkerID)
+
+	heavyWork()
+	time.Sleep(60 * time.Second)
+
+	duration := time.Since(start)
+	failed := rand.Float32() < 0.2
+
+	if failed {
+
+		metrics.JobsFailed.WithLabelValues(config.C.WorkerID, "retry").Inc()
+
+		retry, _ := redis.RDB.HIncrBy(jobCtx, jobKey, "retry_count", 1).Result()
+
+		if retry > int64(config.C.MaxRetry) {
+
+			log.Printf("event=job_dlq id=%s", jobID)
+
+			redis.RDB.HSet(jobCtx, jobKey, "status", "DLQ")
+			redis.RDB.LPush(jobCtx, "dead_letter_queue", jobID)
+			redis.RDB.Expire(jobCtx, "dead_letter_queue", 24*time.Hour)
+
+			redis.RDB.XAck(jobCtx, streamName, groupName, msgID)
+			return
+		}
+
+		log.Printf("event=job_retry_scheduled id=%s retry=%d", jobID, retry)
+
+		scheduleRetry(jobCtx, jobID, retry)
+
+		redis.RDB.HSet(jobCtx, jobKey, map[string]interface{}{
+			"status":     "FAILED",
+			"started_at": 0,
+			"worker_id":  "",
+		})
+
+		redis.RDB.XAck(jobCtx, streamName, groupName, msgID)
+		return
+	}
+
+	log.Printf("event=job_completed id=%s duration=%s", jobID, duration)
+
+	metrics.JobsProcessed.WithLabelValues(config.C.WorkerID).Inc()
+	metrics.JobDuration.WithLabelValues(config.C.WorkerID).Observe(duration.Seconds())
+
+	redis.RDB.HSet(jobCtx, jobKey, map[string]interface{}{
+		"status":    "COMPLETED",
+		"worker_id": "",
+	})
+
+	redis.RDB.Expire(jobCtx, jobKey, jobTTL)
+
+	redis.RDB.XAck(jobCtx, streamName, groupName, msgID)
+}
+
+// ---------------- LOOP ----------------
+
+func workerLoop(ctx context.Context, consumerName string, sem chan struct{}) {
+
+	go func() {
+		for {
+			msgs, _, err := redis.RDB.XAutoClaim(ctx, &redisClient.XAutoClaimArgs{
+				Stream:   streamName,
+				Group:    groupName,
+				Consumer: consumerName,
+				MinIdle:  30 * time.Second,
+				Start:    "0",
+				Count:    50,
+			}).Result()
+
+			if err != nil && err != redisClient.Nil {
+				log.Printf("event=autoclaim_error err=%v", err)
+				time.Sleep(2 * time.Second)
+				continue
+			}
+
+			if len(msgs) == 0 {
+				break
+			}
+
+			for _, msg := range msgs {
+				sem <- struct{}{}
+
+				go handleMessage(ctx, consumerName, msg, sem)
+			}
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		streams, err := redis.RDB.XReadGroup(ctx, &redisClient.XReadGroupArgs{
+			Group:    groupName,
+			Consumer: consumerName,
+			Streams:  []string{streamName, ">"},
+			Count:    10,
+			Block:    5 * time.Second,
+		}).Result()
+
+		if err != nil {
+			if err == redisClient.Nil || strings.Contains(err.Error(), "redis: nil") {
+				continue
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("event=xreadgroup_error err=%v", err)
+			continue
+		}
+
+		for _, stream := range streams {
+			for _, msg := range stream.Messages {
+				sem <- struct{}{}
+
+				go handleMessage(ctx, consumerName, msg, sem)
+			}
+		}
+	}
+}
+
+func handleMessage(ctx context.Context, consumerName string, msg redisClient.XMessage, sem chan struct{}) {
+
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("event=worker_panic msg_id=%s err=%v", msg.ID, r)
+		}
+		<-sem
+	}()
+
+	processJob(ctx, msg.ID, msg.Values)
+
+	err := redis.RDB.XAck(ctx, streamName, groupName, msg.ID).Err()
+	if err != nil {
+		log.Printf("event=xack_failed msg_id=%s err=%v", msg.ID, err)
+	}
+}
+
+// ---------------- ENTRY ----------------
+
+func StartWorker(ctx context.Context) {
+
+	log.Printf("event=worker_started id=%s concurrency=%d", config.C.WorkerID, concurrency)
+
+	metrics.WorkerActive.WithLabelValues(config.C.WorkerID).Set(1)
+
+	initConsumerGroup(ctx)
+
+	sem := make(chan struct{}, concurrency)
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("event=retry_scheduler_panic err=%v", r)
+			}
+		}()
+		retryScheduler(ctx)
+	}()
+
+	consumerName := config.C.WorkerID
+
+	for i := 0; i < concurrency; i++ {
+		go workerLoop(ctx, consumerName, sem)
+	}
+
+	<-ctx.Done()
+
+	metrics.WorkerActive.WithLabelValues(config.C.WorkerID).Set(0)
+
+	log.Println("event=worker_stopped graceful_shutdown=true")
+}
+-e 
+
+================================================================
+FILE: ./internal/recovery/recovery.go
+================================================================
+package recovery
+
+import (
+	"context"
+	"log"
+	"time"
+
+	redisClient "github.com/redis/go-redis/v9"
+
+	"kubejobs/internal/config"
+	"kubejobs/internal/redis"
+)
+
+const (
+	streamName   = "jobs_stream"
+	groupName    = "workers"
+	retryZSet    = "jobs_retry_zset"
+	minIdleTime  = 30 * time.Second
+	batchSize    = 10
+	scanInterval = 5 * time.Second
+)
+
+// ---------------- DELAYED RETRY ----------------
+
+func scheduleRetry(ctx context.Context, jobID string, retry int64) {
+
+	backoff := time.Duration(1<<retry) * time.Second
+	jitter := time.Duration((retry*137)%1000) * time.Millisecond
+
+	retryAt := time.Now().Add(backoff + jitter).Unix()
+
+	err := redis.RDB.ZAdd(ctx, retryZSet, redisClient.Z{
+		Score:  float64(retryAt),
+		Member: jobID,
+	}).Err()
+
+	if err != nil {
+		log.Println("recovery_retry_schedule_failed", jobID)
+	}
+}
+
+// ---------------- MAIN ----------------
+
+func StartRecovery(ctx context.Context) {
+
+	log.Println("recovery_started")
+
+	for {
+
+		select {
+		case <-ctx.Done():
+			log.Println("recovery_stopped")
+			return
+		default:
+		}
+
+		pending, err := redis.RDB.XPendingExt(ctx, &redisClient.XPendingExtArgs{
+			Stream: streamName,
+			Group:  groupName,
+			Start:  "-",
+			End:    "+",
+			Count:  batchSize,
+		}).Result()
+
+		if err != nil {
+			log.Println("recovery_xpending_error:", err)
+			time.Sleep(scanInterval)
+			continue
+		}
+
+		if len(pending) == 0 {
+			time.Sleep(scanInterval)
+			continue
+		}
+
+		for _, msg := range pending {
+
+			if msg.Idle < minIdleTime {
+				continue
+			}
+
+			log.Printf("recovery_claim_attempt id=%s idle=%s", msg.ID, msg.Idle)
+
+			claimed, err := redis.RDB.XClaim(ctx, &redisClient.XClaimArgs{
+				Stream:   streamName,
+				Group:    groupName,
+				Consumer: config.C.WorkerID, // FIXED
+				MinIdle:  minIdleTime,
+				Messages: []string{msg.ID},
+			}).Result()
+
+			if err != nil || len(claimed) == 0 {
+				continue
+			}
+
+			for _, m := range claimed {
+
+				jobIDRaw, ok := m.Values["job_id"]
+				if !ok {
+					redis.RDB.XAck(ctx, streamName, groupName, m.ID)
+					continue
+				}
+
+				jobID, ok := jobIDRaw.(string)
+				if !ok {
+					redis.RDB.XAck(ctx, streamName, groupName, m.ID)
+					continue
+				}
+
+				jobKey := "job_data:" + jobID
+
+				jobMap, err := redis.RDB.HGetAll(ctx, jobKey).Result()
+				if err != nil || len(jobMap) == 0 {
+					redis.RDB.XAck(ctx, streamName, groupName, m.ID)
+					continue
+				}
+
+				status := jobMap["status"]
+
+				// already completed or DLQ → just ACK
+				if status == "COMPLETED" || status == "DLQ" {
+					redis.RDB.XAck(ctx, streamName, groupName, m.ID)
+					continue
+				}
+
+				retry, _ := redis.RDB.HIncrBy(ctx, jobKey, "retry_count", 1).Result()
+
+				if retry > int64(config.C.MaxRetry) { // FIXED
+
+					log.Printf("event=recovery_dlq id=%s", jobID)
+
+					_ = redis.RDB.HSet(ctx, jobKey, map[string]interface{}{
+						"status":    "DLQ",
+						"worker_id": "",
+					}).Err()
+
+					_ = redis.RDB.LPush(ctx, "dead_letter_queue", jobID).Err()
+
+					redis.RDB.XAck(ctx, streamName, groupName, m.ID)
+					continue
+				}
+
+				log.Printf("event=recovery_retry_scheduled id=%s retry=%d", jobID, retry)
+
+				// mark FAILED
+				_ = redis.RDB.HSet(ctx, jobKey, map[string]interface{}{
+					"status":     "FAILED",
+					"started_at": 0,
+					"worker_id":  "",
+				}).Err()
+
+				// ALWAYS go through retry scheduler
+				scheduleRetry(ctx, jobID, retry)
+
+				// ACK old stuck message
+				redis.RDB.XAck(ctx, streamName, groupName, m.ID)
+			}
+		}
+
+		time.Sleep(scanInterval)
+	}
+}
+-e 
+
+================================================================
+FILE: ./internal/metrics/metrics.go
+================================================================
+package metrics
+
+import (
+	"sync"
+
+	"github.com/prometheus/client_golang/prometheus"
+)
+
+var once sync.Once
+
+var (
+
+	// ---------------- JOB COUNTERS ----------------
+
+	JobsProcessed = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "jobs_processed_total",
+			Help: "Total number of processed jobs",
+		},
+		[]string{"worker"},
+	)
+
+	JobsFailed = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "jobs_failed_total",
+			Help: "Total number of failed jobs",
+		},
+		[]string{"worker", "reason"},
+	)
+
+	// ---------------- LATENCY ----------------
+
+	JobDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "job_duration_seconds",
+			Help: "Job processing duration",
+
+			// better buckets (more realistic distribution)
+			Buckets: []float64{
+				0.1, 0.5, 1, 2, 5, 10, 20, 30,
+			},
+		},
+		[]string{"worker"},
+	)
+
+	// ---------------- QUEUE ----------------
+
+	QueueDepth = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "queue_depth",
+			Help: "Current queue size",
+		},
+		[]string{"stream"},
+	)
+
+	// ---------------- WORKER HEALTH ----------------
+
+	WorkerActive = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "worker_active",
+			Help: "Worker heartbeat status (1=alive)",
+		},
+		[]string{"worker"},
+	)
+)
+
+// ---------------- INIT ----------------
+
+func Init() {
+	once.Do(func() {
+
+		prometheus.MustRegister(
+			JobsProcessed,
+			JobsFailed,
+			JobDuration,
+			QueueDepth,
+			WorkerActive,
+		)
+
+		// Without this, Prometheus may not show metrics until first increment
+		JobsProcessed.WithLabelValues("init").Add(0)
+		JobsFailed.WithLabelValues("init", "init").Add(0)
+		JobDuration.WithLabelValues("init").Observe(0)
+		QueueDepth.WithLabelValues("jobs_stream").Set(0)
+		WorkerActive.WithLabelValues("init").Set(1)
+	})
+}
+-e 
+
+================================================================
+FILE: ./internal/job/model.go
+================================================================
+package job
+
+type Job struct {
+	ID         string `json:"id"`
+	Status     string `json:"status"`
+	CreatedAt  int64  `json:"created_at"`
+	StartedAt  int64  `json:"started_at"`
+	RetryCount int    `json:"retry_count"`
+	WorkerID   string `json:"worker_id"`
+}
+-e 
+
+================================================================
+FILE: ./internal/config/config.go
+================================================================
+package config
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"strconv"
+	"sync"
+	"time"
+)
+
+// ---------------- STRUCT ----------------
+
+type Config struct {
+	AppMode  string
+	WorkerID string
+
+	MaxRetry        int
+	MaxQueueSize    int
+	RecoveryTimeout time.Duration
+}
+
+// singleton instance
+var (
+	C    *Config
+	once sync.Once
+)
+
+func ParseInt(val string) int64 {
+	n, err := strconv.ParseInt(val, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// ---------------- INIT ----------------
+
+func Init() {
+
+	once.Do(func() {
+
+		cfg := &Config{
+			AppMode: getEnv("APP_MODE", "api"),
+
+			WorkerID: getEnv("WORKER_ID",
+				fmt.Sprintf("worker-%d", time.Now().UnixNano()),
+			),
+
+			MaxRetry:     mustGetEnvInt("MAX_RETRY", 3),
+			MaxQueueSize: mustGetEnvInt("MAX_QUEUE_SIZE", 1000),
+
+			RecoveryTimeout: time.Duration(
+				mustGetEnvInt("RECOVERY_TIMEOUT", 40),
+			) * time.Second,
+		}
+
+		validate(cfg)
+
+		C = cfg
+
+		logConfig(cfg) // visibility
+	})
+}
+
+// ---------------- VALIDATION ----------------
+
+func validate(c *Config) {
+
+	if c.MaxRetry < 0 {
+		fatal("MAX_RETRY cannot be negative")
+	}
+
+	if c.MaxQueueSize <= 0 {
+		fatal("MAX_QUEUE_SIZE must be > 0")
+	}
+
+	if c.RecoveryTimeout <= 0 {
+		fatal("RECOVERY_TIMEOUT must be > 0")
+	}
+
+	if c.AppMode != "api" && c.AppMode != "worker" {
+		fatal("APP_MODE must be api or worker")
+	}
+}
+
+// ---------------- LOGGING ----------------
+
+func logConfig(c *Config) {
+	log.Printf(
+		"event=config_loaded mode=%s worker=%s max_retry=%d max_queue=%d recovery_timeout=%s",
+		c.AppMode,
+		c.WorkerID,
+		c.MaxRetry,
+		c.MaxQueueSize,
+		c.RecoveryTimeout.String(),
+	)
+}
+
+// ---------------- HELPERS ----------------
+
+func getEnv(key, def string) string {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	return v
+}
+
+func mustGetEnvInt(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		fatal(fmt.Sprintf("invalid %s=%s", key, v))
+	}
+
+	return n
+}
+
+// ---------------- FAIL FAST ----------------
+
+func fatal(msg string) {
+	log.Printf("event=config_error msg=%s", msg)
+	os.Exit(1)
+}
+-e 
+
+================================================================
+FILE: ./go.mod
+================================================================
+module kubejobs
+
+go 1.23.0
+
+require (
+	github.com/beorn7/perks v1.0.1 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
+	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
+	github.com/prometheus/client_golang v1.23.2 // indirect
+	github.com/prometheus/client_model v0.6.2 // indirect
+	github.com/prometheus/common v0.66.1 // indirect
+	github.com/prometheus/procfs v0.16.1 // indirect
+	github.com/redis/go-redis/v9 v9.18.0 // indirect
+	go.uber.org/atomic v1.11.0 // indirect
+	go.yaml.in/yaml/v2 v2.4.2 // indirect
+	golang.org/x/sys v0.35.0 // indirect
+	google.golang.org/protobuf v1.36.8 // indirect
+)
+-e 
+
+================================================================
+FILE: ./cmd/server/main.go
+================================================================
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	redisClient "github.com/redis/go-redis/v9"
+
+	"kubejobs/internal/config"
+	"kubejobs/internal/job"
+	"kubejobs/internal/metrics"
+	"kubejobs/internal/recovery"
+	"kubejobs/internal/redis"
+	"kubejobs/internal/worker"
+)
+
+const (
+	streamName = "jobs_stream"
+	groupName  = "workers"
+)
+
+var requestCount int64
+var lastReset int64
+
+// ---------------- HELPERS ----------------
+
+func writeJSON(w http.ResponseWriter, status int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(data)
+}
+
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// ---------------- MIDDLEWARE ----------------
+
+func recoverMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
+				log.Printf("event=panic err=%v", err)
+				writeError(w, 500, "internal error")
+			}
+		}()
+		next(w, r)
+	}
+}
+
+func logMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		next(w, r)
+		log.Printf("event=http_request method=%s path=%s duration=%s",
+			r.Method, r.URL.Path, time.Since(start))
+	}
+}
+
+// ---------------- RATE LIMIT ----------------
+
+func allowRequest() bool {
+	now := time.Now().Unix()
+
+	if now != atomic.LoadInt64(&lastReset) {
+		atomic.StoreInt64(&lastReset, now)
+		atomic.StoreInt64(&requestCount, 0)
+	}
+
+	count := atomic.AddInt64(&requestCount, 1)
+	return count <= 200
+}
+
+// ---------------- BACKPRESSURE ----------------
+
+func isQueueOverloaded(ctx context.Context) bool {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	pending, err := redis.RDB.XPending(ctx, streamName, groupName).Result()
+	if err != nil {
+		log.Println("event=backpressure_check_failed err=", err)
+		return false
+	}
+
+	return pending.Count > int64(config.C.MaxQueueSize)
+}
+
+// ---------------- CREATE JOB ----------------
+
+func createJob(w http.ResponseWriter, r *http.Request) {
+
+	// ---------------- BASIC GUARDS ----------------
+
+	if !allowRequest() {
+		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "Only POST allowed")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+
+	if isQueueOverloaded(ctx) {
+		writeError(w, http.StatusTooManyRequests, "queue overloaded")
+		return
+	}
+
+	// ---------------- JOB CREATION ----------------
+
+	jobID := fmt.Sprintf("job_%d", time.Now().UnixNano())
+
+	newJob := job.Job{
+		ID:        jobID,
+		Status:    "PENDING",
+		CreatedAt: time.Now().Unix(),
+	}
+
+	jobKey := "job_data:" + jobID
+
+	start := time.Now()
+
+	// ---------------- STORE METADATA ----------------
+
+	err := redis.RDB.HSet(ctx, jobKey, map[string]interface{}{
+		"id":          jobID,
+		"status":      newJob.Status,
+		"created_at":  newJob.CreatedAt,
+		"started_at":  0,
+		"retry_count": 0,
+		"worker_id":   "",
+	}).Err()
+
+	if err != nil {
+		log.Printf("event=job_store_failed job_id=%s err=%v", jobID, err)
+		writeError(w, 500, "failed to store job")
+		return
+	}
+
+	// ---------------- ENQUEUE ----------------
+
+	_, err = redis.RDB.XAdd(ctx, &redisClient.XAddArgs{
+		Stream: streamName,
+		ID:     "*", // MUST for uniqueness
+		Values: map[string]interface{}{
+			"job_id": jobID,
+		},
+	}).Result()
+
+	if err != nil {
+		log.Printf("event=job_enqueue_failed job_id=%s err=%v", jobID, err)
+		writeError(w, 500, "failed to enqueue job")
+		return
+	}
+
+	// ---------------- METRICS / LOGGING ----------------
+
+	latency := time.Since(start).Milliseconds()
+
+	log.Printf(
+		"event=job_created job_id=%s latency_ms=%d",
+		jobID,
+		latency,
+	)
+
+	// ---------------- RESPONSE ----------------
+
+	writeJSON(w, 200, newJob)
+}
+
+// ---------------- STATS ----------------
+
+func getStats(w http.ResponseWriter, r *http.Request) {
+
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	streamLen, _ := redis.RDB.XLen(ctx, streamName).Result()
+	dlqLen, _ := redis.RDB.LLen(ctx, "dead_letter_queue").Result()
+	pending, _ := redis.RDB.XPending(ctx, streamName, groupName).Result()
+
+	resp := map[string]interface{}{
+		"stream_length": streamLen,
+		"dead_letter":   dlqLen,
+		"pending":       pending.Count,
+	}
+
+	writeJSON(w, 200, resp)
+}
+
+// ---------------- ROUTER ----------------
+
+func buildRouter() *http.ServeMux {
+
+	mux := http.NewServeMux()
+
+	wrap := func(h http.HandlerFunc) http.HandlerFunc {
+		return recoverMiddleware(logMiddleware(h))
+	}
+
+	mux.HandleFunc("/jobs", wrap(createJob))
+	mux.HandleFunc("/stats", wrap(getStats))
+
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+
+	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mux.Handle("/metrics", promhttp.Handler())
+
+	return mux
+}
+
+// ---------------- METRICS SERVER (FOR WORKER) ----------------
+
+func startMetricsServer(port string) {
+	go func() {
+
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", promhttp.Handler())
+
+		server := &http.Server{
+			Addr:    port,
+			Handler: mux,
+		}
+
+		log.Println("event=metrics_server_started port=" + port)
+
+		if err := server.ListenAndServe(); err != nil {
+			log.Println("metrics server error:", err)
+		}
+	}()
+}
+
+// ---------------- API ----------------
+
+func startAPI(ctx context.Context) {
+
+	server := &http.Server{
+		Addr:         ":8080",
+		Handler:      buildRouter(),
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 5 * time.Second,
+		IdleTimeout:  30 * time.Second,
+	}
+
+	go func() {
+		log.Println("event=api_started addr=:8080")
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	}()
+
+	<-ctx.Done()
+
+	log.Println("event=api_shutdown")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	server.Shutdown(shutdownCtx)
+}
+
+// ---------------- WORKER ----------------
+
+func startWorkerMode(ctx context.Context) {
+
+	log.Println("event=worker_started id=", config.C.WorkerID)
+
+	// worker metrics exposed on different port
+	startMetricsServer(":8081")
+
+	go worker.StartWorker(ctx)
+	go recovery.StartRecovery(ctx)
+
+	<-ctx.Done()
+}
+
+// ---------------- MAIN ----------------
+
+func main() {
+
+	config.Init()
+	redis.InitRedis()
+	metrics.Init()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		stop := make(chan os.Signal, 1)
+		signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+		<-stop
+		log.Println("event=shutdown_signal_received")
+		cancel()
+	}()
+
+	if config.C.AppMode == "worker" {
+		startWorkerMode(ctx)
+	} else {
+		startAPI(ctx)
+	}
+
+	redis.CloseRedis()
+
+	log.Println("event=app_stopped")
+}
+-e 
+

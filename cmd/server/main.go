@@ -99,6 +99,8 @@ func isQueueOverloaded(ctx context.Context) bool {
 
 func createJob(w http.ResponseWriter, r *http.Request) {
 
+	// ---------------- BASIC GUARDS ----------------
+
 	if !allowRequest() {
 		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 		return
@@ -117,16 +119,24 @@ func createJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ---------------- JOB CREATION ----------------
+
+	jobID := fmt.Sprintf("job_%d", time.Now().UnixNano())
+
 	newJob := job.Job{
-		ID:        fmt.Sprintf("job_%d", time.Now().UnixNano()),
+		ID:        jobID,
 		Status:    "PENDING",
 		CreatedAt: time.Now().Unix(),
 	}
 
-	jobKey := "job_data:" + newJob.ID
+	jobKey := "job_data:" + jobID
+
+	start := time.Now()
+
+	// ---------------- STORE METADATA ----------------
 
 	err := redis.RDB.HSet(ctx, jobKey, map[string]interface{}{
-		"id":          newJob.ID,
+		"id":          jobID,
 		"status":      newJob.Status,
 		"created_at":  newJob.CreatedAt,
 		"started_at":  0,
@@ -135,25 +145,38 @@ func createJob(w http.ResponseWriter, r *http.Request) {
 	}).Err()
 
 	if err != nil {
-		log.Println("event=job_store_failed err=", err)
+		log.Printf("event=job_store_failed job_id=%s err=%v", jobID, err)
 		writeError(w, 500, "failed to store job")
 		return
 	}
 
-	err = redis.RDB.XAdd(ctx, &redisClient.XAddArgs{
+	// ---------------- ENQUEUE ----------------
+
+	_, err = redis.RDB.XAdd(ctx, &redisClient.XAddArgs{
 		Stream: streamName,
+		ID:     "*", // MUST for uniqueness
 		Values: map[string]interface{}{
-			"job_id": newJob.ID,
+			"job_id": jobID,
 		},
-	}).Err()
+	}).Result()
 
 	if err != nil {
-		log.Println("event=job_enqueue_failed err=", err)
+		log.Printf("event=job_enqueue_failed job_id=%s err=%v", jobID, err)
 		writeError(w, 500, "failed to enqueue job")
 		return
 	}
 
-	log.Printf("event=job_created id=%s", newJob.ID)
+	// ---------------- METRICS / LOGGING ----------------
+
+	latency := time.Since(start).Milliseconds()
+
+	log.Printf(
+		"event=job_created job_id=%s latency_ms=%d",
+		jobID,
+		latency,
+	)
+
+	// ---------------- RESPONSE ----------------
 
 	writeJSON(w, 200, newJob)
 }
