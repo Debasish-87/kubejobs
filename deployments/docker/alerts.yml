@@ -1,0 +1,31 @@
+groups:
+  - name: kubejobs-alerts
+    rules:
+
+      # High queue backlog
+      - alert: HighQueueBacklog
+        expr: queue_depth > 100
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Queue backlog high"
+          description: "Queue size is above 100"
+
+      # Worker down
+      - alert: WorkerDown
+        expr: worker_active == 0
+        for: 15s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Worker is down"
+
+      # Job failure spike
+      - alert: HighJobFailureRate
+        expr: rate(jobs_failed_total[1m]) > 5
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "High job failure rate"

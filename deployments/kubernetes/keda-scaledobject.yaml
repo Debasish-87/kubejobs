@@ -1,0 +1,35 @@
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: redis-auth
+  namespace: kubejobs
+spec:
+  secretTargetRef:
+  - parameter: password
+    name: keda-redis-secret
+    key: password
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-scaler
+  namespace: kubejobs
+spec:
+  scaleTargetRef:
+    name: worker
+
+  minReplicaCount: 2
+  maxReplicaCount: 15
+
+  pollingInterval: 5
+  cooldownPeriod: 30
+
+  triggers:
+  - type: redis-streams
+    metadata:
+      address: redis-0.redis.kubejobs.svc.cluster.local:6379
+      stream: jobs_stream
+      consumerGroup: workers
+      pendingEntriesCount: "10"
+    authenticationRef:
+      name: redis-auth
