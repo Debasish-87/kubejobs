@@ -1,56 +1,60 @@
-# KubeJobs — Kubernetes-based Distributed Job Processing System
+# KubeJobs — Distributed Job Processing System (Production-Oriented)
 
 ## Overview
 
-KubeJobs is a fault-tolerant distributed job processing system built using Go and Redis Streams.
+KubeJobs is a **distributed, fault-tolerant job processing system** built using Go and Redis Streams.
 
-It supports asynchronous background job execution with strong guarantees around:
+It is designed for **high-throughput asynchronous workloads** and implements:
 
-* retry handling
-* failure recovery
-* idempotent processing
-* queue-based scaling
+* reliable job execution
+* retry orchestration with backoff
+* failure recovery for stuck jobs
+* idempotent processing guarantees
+* queue-driven autoscaling
 
-The system is designed to simulate real-world distributed workloads and demonstrate infrastructure-level thinking.
+This system models **real-world distributed systems behavior**, not just basic background job execution.
 
 ---
 
 ## System Evolution
 
-### v1 — Docker-based System
+### v1 — Docker-Based Runtime
 
-* Containerized services using Docker Compose
-* Custom autoscaler based on queue depth
-* Prometheus + Grafana for observability
+* Docker Compose-based multi-service setup
+* Redis-backed queue with worker pool
+* Custom autoscaler driven by queue depth
+* Prometheus + Grafana for metrics
 
-### v2 — Kubernetes-based System
+### v2 — Kubernetes-Based Runtime
 
-* API and Worker deployed as Kubernetes Deployments
-* Redis deployed using StatefulSet with persistent storage
-* Horizontal Pod Autoscaler (HPA)
-* KEDA-based queue-driven autoscaling
-* ResourceQuota and LimitRange for resource control
-* Liveness and Readiness probes
+* API and Worker as independent Deployments
+* Redis deployed via StatefulSet with persistence
+* Horizontal Pod Autoscaler (CPU + Memory signals)
+* KEDA for queue-driven autoscaling (Redis Streams lag)
+* ResourceQuota and LimitRange enforcement
+* Liveness and Readiness probes for resiliency
 
 ---
 
 ## Architecture
 
 ```
-Client (API)
-   ↓
-Redis Streams (Job Queue)
-   ↓
-Worker Pool (Consumer Group)
-   ↓
-Processing
-   ↓
+Client
+  ↓
+API Layer (Rate Limit + Backpressure)
+  ↓
+Redis Streams (jobs_stream)
+  ↓
+Consumer Group (workers)
+  ↓
+Processing Engine
+  ↓
  ├── Success → Completed
- ├── Failure → Retry (ZSET with backoff)
+ ├── Failure → Retry Queue (ZSET + backoff)
  └── Max Retry → Dead Letter Queue (DLQ)
 
 Recovery System:
-Pending Jobs → XCLAIM → Reprocess
+Pending → XAUTOCLAIM / XCLAIM → Reprocessing
 ```
 
 ---
@@ -59,43 +63,69 @@ Pending Jobs → XCLAIM → Reprocess
 
 ### Job Processing
 
-* Redis Streams-based queue
-* Consumer group worker model
-* Concurrent job execution
-* Idempotent processing using locks
+* Redis Streams as primary queue
+* Consumer group model for horizontal scaling
+* Concurrent worker execution
+* Distributed locking (`SETNX`) for idempotency
 
-### Reliability
+---
 
-* Retry with exponential backoff
-* Dead Letter Queue (DLQ)
-* Recovery of stuck jobs using XCLAIM
-* Graceful worker shutdown
+### Reliability & Fault Tolerance
+
+* Exponential retry with jitter (prevents retry storms)
+* Dead Letter Queue for poison jobs
+* Recovery loop using `XPENDING` + `XCLAIM`
+* Graceful shutdown with in-flight job draining
+
+---
+
+### Backpressure & Rate Control
+
+* API-level rate limiting (~200 req/sec)
+* Queue depth–based rejection (overload protection)
+* Prevents unbounded queue growth
+
+---
 
 ### Observability
 
-* Prometheus metrics
-* Job processing latency histogram
-* Queue depth tracking
-* Worker health metrics
+* Prometheus metrics exposed by API and Worker
+* Key metrics:
+
+  * job throughput
+  * failure rate
+  * latency histogram
+  * queue depth
+  * worker health
+
+---
 
 ### Autoscaling
 
 #### Docker (v1)
 
-* Custom autoscaler script based on queue size
+* Custom autoscaler based on queue thresholds
 
 #### Kubernetes (v2)
 
-* HPA (CPU + Memory based scaling)
-* KEDA (Redis Streams queue-based scaling)
+**HPA (Resource-based scaling)**
+
+* CPU target: 60%
+* Memory target: 70%
+
+**KEDA (Demand-based scaling)**
+
+* Trigger: Redis Stream lag
+* Fast polling interval (2s)
+* Scale range: 2 → 50 workers
 
 ---
 
 ## Tech Stack
 
 * Go (Golang)
-* Redis (Streams + ZSET + Hash)
-* Docker & Docker Compose
+* Redis (Streams, ZSET, Hash)
+* Docker / Docker Compose
 * Kubernetes
 * Prometheus
 * Grafana
@@ -106,50 +136,47 @@ Pending Jobs → XCLAIM → Reprocess
 ## Project Structure
 
 ```
-cmd/server           → application entrypoint  
-internal/            → core logic (worker, redis, recovery, metrics)  
-deployments/docker   → docker-compose setup  
-deployments/kubernetes → k8s manifests (deployments, HPA, KEDA)  
-scripts/             → dev automation tools  
+cmd/server               → application entrypoint  
+internal/
+  ├── worker            → job execution engine
+  ├── redis             → client + connection management
+  ├── recovery          → stuck job recovery logic
+  ├── metrics           → Prometheus instrumentation
+  ├── config            → environment configuration
+deployments/
+  ├── docker            → local development stack
+  ├── kubernetes        → production manifests
+scripts/
+  ├── k8sctl.sh         → cluster automation
 ```
 
 ---
 
 ## Running the System
 
-### Docker (v1)
+### Docker (Local Development)
 
-Start system:
-
-```
-docker compose up
+```bash
+docker compose up --build
 ```
 
-Start with autoscaler:
+Load testing:
 
-```
-./scripts/devctl.sh dev
-```
-
-Send load:
-
-```
+```bash
 ./scripts/devctl.sh test 500
 ```
 
 ---
 
-### Kubernetes (v2)
+### Kubernetes (Cluster Deployment)
 
-Apply resources:
-
-```
-kubectl apply -f deployments/kubernetes/
+```bash
+./scripts/k8sctl.sh setup
 ```
 
-Check pods:
+Verify:
 
-```
+```bash
 kubectl get pods -n kubejobs
 ```
 
@@ -157,12 +184,13 @@ kubectl get pods -n kubejobs
 
 ## Scaling Behavior
 
-### Worker Scaling
+### Worker Scaling Signals
 
-* HPA scales based on CPU and memory usage
-* KEDA scales based on Redis stream backlog
+* CPU utilization (HPA)
+* Memory utilization (HPA)
+* Queue backlog (KEDA)
 
-### Example Scaling Logic (Docker autoscaler)
+### Example Scaling Logic (v1 reference)
 
 * queue > 1000 → 20 workers
 * queue > 500 → 10 workers
@@ -172,48 +200,113 @@ kubectl get pods -n kubejobs
 
 ---
 
-## Failure Handling
+## Failure Handling Model
 
-The system ensures reliability through:
+The system guarantees **at-least-once processing** through:
 
-* exponential retry scheduling using Redis ZSET
-* job state tracking in Redis Hash
-* DLQ for failed jobs
-* recovery of stuck jobs using XCLAIM
-* duplicate prevention via distributed locks
+* Redis Streams acknowledgment (`XACK`)
+* Retry scheduling via ZSET
+* Job state stored in Redis Hash
+* Distributed locks to prevent duplication
+
+Failure paths:
+
+1. **Transient failure → retry**
+2. **Repeated failure → DLQ**
+3. **Worker crash → recovery loop reclaims job**
 
 ---
 
-## Limitations (Current)
+## Observability Endpoints
 
-* Redis is single-node (no HA)
-* No distributed tracing (OpenTelemetry missing)
+* API → `/metrics`, `/health`, `/ready`
+* Worker → `/metrics`
+
+---
+
+## Current Limitations (Critical)
+
+This system is **not production-safe yet**. Key gaps:
+
+### Infrastructure
+
+* Redis is single-node (SPOF)
+* No sharding of job streams
+
+### Security
+
+* No TLS (internal or external)
+* No authentication on API
+* Redis password exposed in configs
+* No NetworkPolicy isolation
+
+### Deployment
+
+* Image versioning not enforced (`latest`)
 * No CI/CD pipeline
-* No network isolation or TLS
-* Image versioning not enforced (`latest` used in some configs)
+* No rollback strategy
+
+### Observability
+
+* No distributed tracing (OpenTelemetry missing)
+* Limited debugging visibility (job payload not stored)
 
 ---
 
-## What This Project Demonstrates
+## What This Project Actually Demonstrates
 
-* Distributed system design using queues
-* Worker concurrency and coordination
-* Failure handling and retry strategies
-* Observability and metrics design
-* Container orchestration (Docker + Kubernetes)
-* Autoscaling strategies (HPA + KEDA)
+* Real distributed queue design using Redis Streams
+* Worker coordination via consumer groups
+* Retry orchestration and backoff strategies
+* Failure recovery under worker crashes
+* Autoscaling using both resource and demand signals
+* Production-style Kubernetes deployment patterns
 
 ---
 
-## Next Steps (v3 — Production Infra)
+## What Will Break Under Real Load
 
-Planned improvements:
+Let’s be precise:
 
-* Redis High Availability (Sentinel / Cluster)
-* Distributed tracing (OpenTelemetry)
-* CI/CD pipeline (GitHub Actions)
-* Chaos testing (failure simulation)
-* Security hardening (Secrets, NetworkPolicy, TLS)
+* Redis becomes bottleneck → no horizontal scaling
+* Single stream → throughput ceiling
+* Retry storms → ZSET amplification
+* Lock contention → latency spikes
+* No payload visibility → debugging pain
+
+---
+
+## Next Steps (v3 — Production Hardening)
+
+### Infrastructure
+
+* Redis Cluster / Sentinel (HA)
+* Stream sharding (multiple queues)
+
+### Security
+
+* TLS (Ingress + Redis)
+* API authentication (JWT / API keys)
+* Secret management (Vault / K8s best practices)
+* NetworkPolicy enforcement
+
+### Observability
+
+* OpenTelemetry tracing
+* Structured logging (JSON)
+
+### CI/CD
+
+* GitHub Actions pipeline
+* Image tagging (no `latest`)
+* Blue/Green or Canary deployment
+
+### System Enhancements
+
+* Job payload support
+* Priority queues
+* Rate-aware retry control
+* Multi-tenant isolation
 
 ---
 
