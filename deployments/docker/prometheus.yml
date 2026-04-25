@@ -1,0 +1,30 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+
+  # ---------------- API ----------------
+  - job_name: "kubejobs-api"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8080"]
+
+  # ---------------- WORKER (AUTO DISCOVERY) ----------------
+  - job_name: "kubejobs-worker"
+    metrics_path: /metrics
+
+    dns_sd_configs:
+      - names:
+          - "worker"
+        type: "A"
+        port: 8081
+
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+
+  # ---------------- PROMETHEUS ----------------
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
