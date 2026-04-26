@@ -1,0 +1,151 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: kubejobs
+  labels:
+    app: worker
+    component: backend
+    version: v2.0.0
+
+spec:
+  replicas: 3
+  revisionHistoryLimit: 3
+
+  selector:
+    matchLabels:
+      app: worker
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+
+  template:
+    metadata:
+      labels:
+        app: worker
+        version: v2.0.0
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8081"
+        prometheus.io/path: "/metrics"
+
+    spec:
+      # Allow enough time for in-flight jobs to drain (matches preStop sleep + job timeout)
+      terminationGracePeriodSeconds: 60
+
+      containers:
+        - name: worker
+          image: kubejobs:v2.0.0
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: metrics
+              containerPort: 8081
+              protocol: TCP
+
+          env:
+            - name: APP_MODE
+              value: "worker"
+
+            - name: REDIS_ADDR
+              value: "redis:6379"
+
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-secret
+                  key: password
+
+            - name: MAX_RETRY
+              value: "3"
+
+            - name: MAX_QUEUE_SIZE
+              value: "1000"
+
+            - name: LOG_LEVEL
+              value: "info"
+
+            # Read by config.go via mustGetEnvInt("WORKER_CONCURRENCY", 5)
+            - name: WORKER_CONCURRENCY
+              value: "5"
+
+            # Unique worker identity per pod — uses pod name
+            - name: WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
+          # ── STARTUP PROBE ──────────────────────────────────────────────────
+          # Waits up to 90s (30 × 3s) for the metrics server on :8081 to respond.
+          # Only after this succeeds do readiness/liveness probes kick in.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            failureThreshold: 30
+            periodSeconds: 3
+            timeoutSeconds: 2
+
+          # ── READINESS PROBE ────────────────────────────────────────────────
+          # Worker is ready when its health endpoint responds.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+            successThreshold: 1
+
+          # ── LIVENESS PROBE ─────────────────────────────────────────────────
+          # A longer failure threshold avoids killing workers mid-job under GC pressure.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 5
+
+          # ── GRACEFUL SHUTDOWN ──────────────────────────────────────────────
+          # Sleep gives Kubernetes time to remove this pod from endpoint slices
+          # before the process begins draining in-flight jobs.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 15"]
+
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+
+      securityContext:
+        fsGroup: 1000
+        runAsNonRoot: true
+
+      # Spread worker pods across nodes for resilience
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: worker

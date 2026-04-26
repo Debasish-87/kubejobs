@@ -1,0 +1,114 @@
+version: "3.9"
+
+# Load .env from the project root automatically.
+# Run with: docker compose --env-file ../../.env up
+
+services:
+
+  # ---------------- REDIS ----------------
+  redis:
+    image: redis:7
+    command:
+      [
+        "redis-server",
+        "--appendonly", "yes",
+        "--appendfsync", "everysec",
+        "--requirepass", "${REDIS_PASSWORD}"
+      ]
+    volumes:
+      - redis_data:/data
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - kubejobs-net
+
+
+  # ---------------- API ----------------
+  api:
+    build:
+      context: ../../
+      dockerfile: deployments/docker/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - REDIS_ADDR=redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - APP_MODE=api
+      - MAX_QUEUE_SIZE=1000
+      - MAX_RETRY=3
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - kubejobs-net
+
+
+  # ---------------- WORKER ----------------
+  worker:
+    build:
+      context: ../../
+      dockerfile: deployments/docker/Dockerfile
+    environment:
+      - REDIS_ADDR=redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - APP_MODE=worker
+      - MAX_RETRY=3
+      - WORKER_CONCURRENCY=10
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - kubejobs-net
+
+
+  # ---------------- PROMETHEUS ----------------
+  prometheus:
+    image: prom/prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./alerts.yml:/etc/prometheus/alerts.yml
+    ports:
+      - "9090:9090"
+    depends_on:
+      - api
+      - worker
+    restart: unless-stopped
+    networks:
+      - kubejobs-net
+
+
+  # ---------------- GRAFANA ----------------
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - kubejobs-net
+
+
+# ---------------- STORAGE ----------------
+volumes:
+  redis_data:
+  grafana_data:
+
+
+# ---------------- NETWORK ----------------
+networks:
+  kubejobs-net:
+    driver: bridge
