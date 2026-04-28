@@ -3,10 +3,17 @@ kind: ResourceQuota
 metadata:
   name: kubejobs-quota
   namespace: kubejobs
+
 spec:
   hard:
     requests.cpu: "4"
-    requests.memory: 4Gi
+    requests.memory: "4Gi"
+
     limits.cpu: "6"
-    limits.memory: 6Gi
+    limits.memory: "6Gi"
+
     pods: "30"
+
+    services: "10"
+    configmaps: "20"
+    secrets: "20"

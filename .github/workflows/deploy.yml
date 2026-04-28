@@ -1,0 +1,107 @@
+name: Full Deploy KubeJobs
+
+on:
+  push:
+    branches: [ "main", "aws-prod-latest" ]
+
+env:
+  AWS_REGION: ap-south-1
+  CLUSTER_NAME: kubejobs
+  NAMESPACE: kubejobs
+  ECR_REPO: 409837635702.dkr.ecr.ap-south-1.amazonaws.com/kubejobs
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+
+    # ---------------- CHECKOUT ----------------
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    # ---------------- AWS AUTH ----------------
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    # ---------------- LOGIN ECR ----------------
+    - name: Login to ECR
+      run: |
+        aws ecr get-login-password --region $AWS_REGION \
+        | docker login --username AWS --password-stdin $ECR_REPO
+
+    # ---------------- BUILD IMAGE ----------------
+    - name: Build Image
+      run: |
+        docker build -f deployments/docker/Dockerfile -t kubejobs:latest .
+        docker tag kubejobs:latest $ECR_REPO:latest
+
+    # ---------------- PUSH IMAGE ----------------
+    - name: Push Image
+      run: docker push $ECR_REPO:latest
+
+    # ---------------- SETUP KUBECTL ----------------
+    - name: Setup kubeconfig
+      run: |
+        aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
+
+    # ---------------- ENSURE BASE RESOURCES ----------------
+    - name: Apply base configs
+      run: |
+        kubectl apply -f deployments/kubernetes/namespace.yaml
+        kubectl apply -f deployments/kubernetes/serviceaccount.yaml
+        kubectl apply -f deployments/kubernetes/limit-range.yaml
+        kubectl apply -f deployments/kubernetes/resource-quota.yaml
+        kubectl apply -f deployments/kubernetes/network-policy.yaml
+
+    # ---------------- SECRET (IDEMPOTENT) ----------------
+    - name: Apply Secret (Redis TLS)
+      run: |
+        kubectl create secret generic app-config \
+          --from-literal=REDIS_ADDR=rediss://master.kubejobs-redis.rw0frw.aps1.cache.amazonaws.com:6379 \
+          -n $NAMESPACE \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+    # ---------------- DEPLOY ----------------
+    - name: Deploy App
+      run: |
+        kubectl apply -f deployments/kubernetes/api-deployment.yaml
+        kubectl apply -f deployments/kubernetes/worker-deployment.yaml
+        kubectl apply -f deployments/kubernetes/service.yaml
+
+    # ---------------- WAIT FOR ROLLOUT ----------------
+    - name: Wait for deployments
+      run: |
+        kubectl rollout status deployment/api -n $NAMESPACE --timeout=180s
+        kubectl rollout status deployment/worker -n $NAMESPACE --timeout=180s
+
+    # ---------------- GET LOADBALANCER ----------------
+    - name: Get External IP
+      run: |
+        echo "Waiting for LoadBalancer..."
+        for i in {1..40}; do
+          HOST=$(kubectl get svc api -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          if [ -n "$HOST" ]; then
+            echo "API_URL=http://$HOST" >> $GITHUB_ENV
+            echo "Found: $HOST"
+            exit 0
+          fi
+          sleep 10
+        done
+        echo "Failed to get external IP"
+        exit 1
+
+    # ---------------- HEALTH CHECK ----------------
+    - name: Health Check
+      run: |
+        curl -f $API_URL/health
+
+    # ---------------- RUN FULL TEST SUITE ----------------
+    - name: Run Integration Tests
+      run: |
+        chmod +x test.sh
+        BASE_URL=$API_URL ./test.sh

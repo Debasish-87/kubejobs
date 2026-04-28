@@ -20,12 +20,13 @@ spec:
         app: api
 
     spec:
+      serviceAccountName: kubejobs-sa
       terminationGracePeriodSeconds: 15
 
       containers:
         - name: api
-          image: kubejobs:v2.0.0
-          imagePullPolicy: IfNotPresent
+          image: 409837635702.dkr.ecr.ap-south-1.amazonaws.com/kubejobs:latest
+          imagePullPolicy: Always
 
           ports:
             - containerPort: 8080
@@ -35,13 +36,10 @@ spec:
               value: "api"
 
             - name: REDIS_ADDR
-              value: "redis:6379"
-
-            - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: redis-secret
-                  key: password
+                  name: app-config
+                  key: REDIS_ADDR
 
             - name: MAX_QUEUE_SIZE
               value: "1000"

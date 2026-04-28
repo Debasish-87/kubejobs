@@ -6,12 +6,14 @@ metadata:
   labels:
     app: api
     component: backend
+
 spec:
-  type: NodePort
+  type: LoadBalancer
+
   selector:
     app: api
+
   ports:
     - name: http
       port: 80
       targetPort: 8080
-      nodePort: 30080

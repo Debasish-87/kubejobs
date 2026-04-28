@@ -10,5 +10,9 @@ metadata:
     app.kubernetes.io/part-of: job-system
     app.kubernetes.io/managed-by: kubectl
 
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+
   annotations:
     description: "KubeJobs distributed job processing system namespace"

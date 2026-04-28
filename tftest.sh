@@ -6,7 +6,7 @@ if minikube status 2>/dev/null | grep -q "Running\|host: Running"; then
   MINIKUBE_IP=$(minikube ip 2>/dev/null)
   BASE_URL="http://$MINIKUBE_IP:30080"
 else
-  BASE_URL="http://$(kubectl get nodes -o wide | awk 'NR==2 {print $6}'):30080"
+  BASE_URL="http://localhost:8080"
 fi
 
 PASS=0

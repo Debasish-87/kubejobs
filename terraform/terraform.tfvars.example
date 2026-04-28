@@ -1,0 +1,17 @@
+# Copy this file and fill in your values:
+#   cp terraform.tfvars.example terraform.tfvars
+
+region      = "ap-south-1"
+environment = "prod"
+
+vpc_cidr = "10.0.0.0/16"
+azs      = ["ap-south-1a", "ap-south-1b"]
+
+cluster_name       = "kubejobs"
+node_instance_types = ["m7i-flex.large", "c7i-flex.large"]
+desired_capacity   = 2
+min_size           = 1
+max_size           = 5
+
+redis_node_type = "cache.t3.micro"
+redis_replicas  = 1

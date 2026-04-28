@@ -56,7 +56,7 @@ function check_deps() {
     if kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
         log_ok "KEDA CRDs found"
     else
-        log_warn "KEDA CRDs not found — ScaledObject will fail"
+        log_warn "KEDA CRDs not found — ScaledObject will be skipped"
         log_warn "Install KEDA: helm install keda kedacore/keda -n keda --create-namespace"
     fi
 
@@ -135,9 +135,16 @@ function get_api_url() {
 function cleanup() {
     log_banner "Cleaning Previous Deployment"
 
-    # Remove autoscalers first (they hold finalizers)
-    kubectl delete scaledobject worker-scaler \
-        -n "$NAMESPACE" --ignore-not-found=true
+    # Remove KEDA ScaledObject only if KEDA CRDs exist
+    if kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
+        kubectl delete scaledobject worker-scaler \
+            -n "$NAMESPACE" --ignore-not-found=true
+        log_ok "KEDA ScaledObject removed"
+    else
+        log_warn "KEDA not installed — skipping ScaledObject cleanup"
+    fi
+
+    # Remove HPA
     kubectl delete hpa worker-hpa \
         -n "$NAMESPACE" --ignore-not-found=true
 
@@ -235,18 +242,23 @@ function apply_all() {
     log_info "Deploying Worker..."
     kubectl apply -f "$K8S_DIR/worker-deployment.yaml"
 
-    # 8. Autoscaling
+    # 8. Autoscaling — HPA always, KEDA only if CRDs exist
     log_info "Applying autoscaling rules..."
-    kubectl apply -f "$K8S_DIR/hpa-worker.yaml"         2>/dev/null || \
+    kubectl apply -f "$K8S_DIR/hpa-worker.yaml" 2>/dev/null || \
         log_warn "hpa-worker.yaml not found — skipping HPA"
-    kubectl apply -f "$K8S_DIR/keda-scaledobject.yaml"  2>/dev/null || \
-        log_warn "keda-scaledobject.yaml not found — skipping KEDA"
+
+    if kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
+        kubectl apply -f "$K8S_DIR/keda-scaledobject.yaml" 2>/dev/null || \
+            log_warn "keda-scaledobject.yaml not found — skipping KEDA"
+    else
+        log_warn "KEDA not installed — skipping ScaledObject (install with helm)"
+    fi
 
     # 9. Networking
     log_info "Applying network policies and ingress..."
-    kubectl apply -f "$K8S_DIR/network-policy.yaml"     2>/dev/null || \
+    kubectl apply -f "$K8S_DIR/network-policy.yaml" 2>/dev/null || \
         log_warn "network-policy.yaml not found — skipping"
-    kubectl apply -f "$K8S_DIR/ingress.yaml"            2>/dev/null || \
+    kubectl apply -f "$K8S_DIR/ingress.yaml" 2>/dev/null || \
         log_warn "ingress.yaml not found — skipping"
 
     log_ok "All manifests applied"
@@ -331,17 +343,14 @@ function test_jobs() {
 
     log_info "Submitting $count jobs to $API_URL/jobs ..."
 
-    local success=0
-    local failed=0
-
     for i in $(seq 1 "$count"); do
-        response=$(curl -s -o /dev/null -w "%{http_code}" \
+        curl -s -o /dev/null -w "%{http_code}" \
             -X POST "$API_URL/jobs" \
             -H "Content-Type: application/json" \
             -d "{\"index\": $i, \"source\": \"k8sctl-test\"}" \
-            --connect-timeout 5 &)
+            --connect-timeout 5 &
 
-        # Throttle: pause briefly every 100 requests to avoid overwhelming the rate limiter
+        # Throttle: pause briefly every 100 requests
         if [ $(( i % 100 )) -eq 0 ]; then
             sleep 0.2
             log_info "  Submitted $i / $count jobs..."
@@ -441,10 +450,11 @@ function validate() {
         kubectl get hpa -n "$NAMESPACE"
     fi
 
-    # 7. KEDA ScaledObject status
-    if kubectl get scaledobject -n "$NAMESPACE" >/dev/null 2>&1; then
+    # 7. KEDA ScaledObject status (only if KEDA installed)
+    if kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
         log_info "KEDA ScaledObject status:"
-        kubectl get scaledobject -n "$NAMESPACE"
+        kubectl get scaledobject -n "$NAMESPACE" 2>/dev/null || \
+            log_warn "No ScaledObjects found"
     fi
 
     echo ""
@@ -475,8 +485,12 @@ function status() {
 
     echo ""
     echo -e "${YELLOW}--- KEDA ScaledObjects ---${NC}"
-    kubectl get scaledobject -n "$NAMESPACE" 2>/dev/null || \
-        log_warn "No ScaledObjects found (KEDA may not be installed)"
+    if kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
+        kubectl get scaledobject -n "$NAMESPACE" 2>/dev/null || \
+            log_warn "No ScaledObjects found"
+    else
+        log_warn "KEDA not installed"
+    fi
 
     echo ""
     echo -e "${YELLOW}--- PVCs ---${NC}"
@@ -580,14 +594,13 @@ function setup() {
     echo -e "  ${GREEN}Health:${NC}     curl $API_URL/health"
     echo -e "  ${GREEN}Stats:${NC}      curl $API_URL/stats | jq ."
     echo -e "  ${GREEN}Submit job:${NC} curl -X POST $API_URL/jobs -H 'Content-Type: application/json' -d '{\"type\":\"test\"}'"
-    echo -e "  ${GREEN}Logs:${NC}       ./k8sctl.sh logs worker"
-    echo -e "  ${GREEN}Status:${NC}     ./k8sctl.sh status"
-    echo -e "  ${GREEN}Teardown:${NC}   ./k8sctl.sh down"
+    echo -e "  ${GREEN}Logs:${NC}       ./scripts/k8sctl.sh logs worker"
+    echo -e "  ${GREEN}Status:${NC}     make k8s-status"
+    echo -e "  ${GREEN}Teardown:${NC}   make k8s-down"
     echo ""
 }
 
 # ---------------- WATCH ----------------
-# Live-refresh status every N seconds
 
 function watch_status() {
     local interval="${1:-5}"
@@ -637,7 +650,7 @@ case "${1:-}" in
         ;;
     help|--help|-h|"")
         echo ""
-        echo "Usage: ./k8sctl.sh <command> [args]"
+        echo "Usage: ./scripts/k8sctl.sh <command> [args]"
         echo ""
         echo "Commands:"
         echo "  setup              Full deploy: build image + apply manifests + smoke test"
@@ -652,16 +665,16 @@ case "${1:-}" in
         echo "  help               Show this help message"
         echo ""
         echo "Examples:"
-        echo "  ./k8sctl.sh setup"
-        echo "  ./k8sctl.sh test 500"
-        echo "  ./k8sctl.sh logs api"
-        echo "  ./k8sctl.sh watch 3"
-        echo "  ./k8sctl.sh down"
+        echo "  make k8s-setup"
+        echo "  make k8s-test N=500"
+        echo "  make k8s-logs component=api"
+        echo "  make k8s-status"
+        echo "  make k8s-down"
         echo ""
         ;;
     *)
         log_error "Unknown command: $1"
-        echo "Run './k8sctl.sh help' to see available commands."
+        echo "Run './scripts/k8sctl.sh help' to see available commands."
         exit 1
         ;;
 esac

@@ -6,7 +6,7 @@ metadata:
   labels:
     app: worker
     component: backend
-    version: v2.0.0
+    version: latest
 
 spec:
   replicas: 3
@@ -26,20 +26,20 @@ spec:
     metadata:
       labels:
         app: worker
-        version: v2.0.0
+        version: latest
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8081"
         prometheus.io/path: "/metrics"
 
     spec:
-      # Allow enough time for in-flight jobs to drain (matches preStop sleep + job timeout)
+      serviceAccountName: kubejobs-sa
       terminationGracePeriodSeconds: 60
 
       containers:
         - name: worker
-          image: kubejobs:v2.0.0
-          imagePullPolicy: IfNotPresent
+          image: 409837635702.dkr.ecr.ap-south-1.amazonaws.com/kubejobs:latest
+          imagePullPolicy: Always
 
           ports:
             - name: metrics
@@ -51,13 +51,10 @@ spec:
               value: "worker"
 
             - name: REDIS_ADDR
-              value: "redis:6379"
-
-            - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: redis-secret
-                  key: password
+                  name: app-config
+                  key: REDIS_ADDR
 
             - name: MAX_RETRY
               value: "3"
@@ -68,11 +65,9 @@ spec:
             - name: LOG_LEVEL
               value: "info"
 
-            # Read by config.go via mustGetEnvInt("WORKER_CONCURRENCY", 5)
             - name: WORKER_CONCURRENCY
               value: "5"
 
-            # Unique worker identity per pod — uses pod name
             - name: WORKER_ID
               valueFrom:
                 fieldRef:
@@ -86,9 +81,6 @@ spec:
               cpu: "500m"
               memory: "512Mi"
 
-          # ── STARTUP PROBE ──────────────────────────────────────────────────
-          # Waits up to 90s (30 × 3s) for the metrics server on :8081 to respond.
-          # Only after this succeeds do readiness/liveness probes kick in.
           startupProbe:
             httpGet:
               path: /health
@@ -97,8 +89,6 @@ spec:
             periodSeconds: 3
             timeoutSeconds: 2
 
-          # ── READINESS PROBE ────────────────────────────────────────────────
-          # Worker is ready when its health endpoint responds.
           readinessProbe:
             httpGet:
               path: /health
@@ -107,10 +97,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 3
             failureThreshold: 3
-            successThreshold: 1
 
-          # ── LIVENESS PROBE ─────────────────────────────────────────────────
-          # A longer failure threshold avoids killing workers mid-job under GC pressure.
           livenessProbe:
             httpGet:
               path: /health
@@ -120,9 +107,6 @@ spec:
             timeoutSeconds: 3
             failureThreshold: 5
 
-          # ── GRACEFUL SHUTDOWN ──────────────────────────────────────────────
-          # Sleep gives Kubernetes time to remove this pod from endpoint slices
-          # before the process begins draining in-flight jobs.
           lifecycle:
             preStop:
               exec:
@@ -141,7 +125,6 @@ spec:
         fsGroup: 1000
         runAsNonRoot: true
 
-      # Spread worker pods across nodes for resilience
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname

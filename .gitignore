@@ -1,4 +1,14 @@
+# Terraform
+.terraform/
+**/.terraform/*
+*.tfstate
+*.tfstate.backup
+.terraform.lock.hcl
+
+# Env
+*.env*
+!.env.example
+
+# Build
 bin/
-*.env.local
-*.env.prod
 server

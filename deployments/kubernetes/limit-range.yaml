@@ -3,12 +3,23 @@ kind: LimitRange
 metadata:
   name: kubejobs-limits
   namespace: kubejobs
+
 spec:
   limits:
-  - type: Container
-    default:
-      cpu: "500m"
-      memory: "512Mi"
-    defaultRequest:
-      cpu: "100m"
-      memory: "128Mi"
+    - type: Container
+
+      default:
+        cpu: "500m"
+        memory: "512Mi"
+
+      defaultRequest:
+        cpu: "100m"
+        memory: "128Mi"
+
+      max:
+        cpu: "1"
+        memory: "1Gi"
+
+      min:
+        cpu: "50m"
+        memory: "64Mi"

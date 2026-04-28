@@ -6,30 +6,25 @@ metadata:
   labels:
     app: api
     component: ingress
+
   annotations:
-    # ── Nginx controller settings ──────────────────────────────────────────
+    kubernetes.io/ingress.class: nginx
+
     nginx.ingress.kubernetes.io/rewrite-target: /
 
-    # Timeouts — match API server WriteTimeout (5s) + some headroom
     nginx.ingress.kubernetes.io/proxy-connect-timeout: "5"
-    nginx.ingress.kubernetes.io/proxy-send-timeout:    "10"
-    nginx.ingress.kubernetes.io/proxy-read-timeout:    "10"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "10"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "10"
 
-    # Rate limiting at ingress level (backs up the in-app 200 req/s limiter)
     nginx.ingress.kubernetes.io/limit-rps: "200"
-
-    # Body size limit — reject oversized payloads before they hit the API
     nginx.ingress.kubernetes.io/proxy-body-size: "1m"
 
-    # Security headers
     nginx.ingress.kubernetes.io/configuration-snippet: |
       more_set_headers "X-Content-Type-Options: nosniff";
       more_set_headers "X-Frame-Options: DENY";
       more_set_headers "X-XSS-Protection: 1; mode=block";
 
 spec:
-  # Required for Kubernetes 1.18+. Change to your installed controller class.
-  # Common values: nginx | traefik | kong | haproxy
   ingressClassName: nginx
 
   rules:
@@ -43,9 +38,3 @@ spec:
                 name: api
                 port:
                   number: 80
-
-  # ── TLS (uncomment when you have a cert-manager ClusterIssuer ready) ────
-  # tls:
-  #   - hosts:
-  #       - kubejobs.local
-  #     secretName: kubejobs-tls
