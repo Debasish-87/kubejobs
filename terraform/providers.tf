@@ -57,3 +57,14 @@ provider "helm" {
     }
   }
 }
+
+
+terraform {
+  backend "s3" {
+    bucket         = "kubejobs-terraform-state"
+    key            = "prod/terraform.tfstate"
+    region         = "ap-south-1"
+    dynamodb_table = "kubejobs-tf-lock"
+    encrypt        = true
+  }
+}
