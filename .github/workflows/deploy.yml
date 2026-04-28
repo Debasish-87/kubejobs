@@ -3,6 +3,9 @@ name: Full Deploy KubeJobs
 on:
   push:
     branches: [ "main", "aws-prod-latest" ]
+    tags:
+      - "v*"
+  workflow_dispatch:
 
 env:
   AWS_REGION: ap-south-1
@@ -31,36 +34,48 @@ jobs:
     # ---------------- LOGIN ECR ----------------
     - name: Login to ECR
       run: |
+        set -e
         aws ecr get-login-password --region $AWS_REGION \
         | docker login --username AWS --password-stdin $ECR_REPO
 
     # ---------------- BUILD IMAGE ----------------
     - name: Build Image
       run: |
+        set -e
         docker build -f deployments/docker/Dockerfile -t kubejobs:latest .
         docker tag kubejobs:latest $ECR_REPO:latest
 
     # ---------------- PUSH IMAGE ----------------
     - name: Push Image
-      run: docker push $ECR_REPO:latest
+      run: |
+        set -e
+        docker push $ECR_REPO:latest
 
     # ---------------- SETUP KUBECTL ----------------
     - name: Setup kubeconfig
       run: |
+        set -e
         aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
 
-    # ---------------- ENSURE BASE RESOURCES ----------------
+    # ---------------- DEBUG CLUSTER ----------------
+    - name: Check cluster access
+      run: |
+        kubectl get nodes
+
+    # ---------------- BASE RESOURCES ----------------
     - name: Apply base configs
       run: |
+        set -e
         kubectl apply -f deployments/kubernetes/namespace.yaml
         kubectl apply -f deployments/kubernetes/serviceaccount.yaml
         kubectl apply -f deployments/kubernetes/limit-range.yaml
         kubectl apply -f deployments/kubernetes/resource-quota.yaml
         kubectl apply -f deployments/kubernetes/network-policy.yaml
 
-    # ---------------- SECRET (IDEMPOTENT) ----------------
+    # ---------------- SECRET ----------------
     - name: Apply Secret (Redis TLS)
       run: |
+        set -e
         kubectl create secret generic app-config \
           --from-literal=REDIS_ADDR=rediss://master.kubejobs-redis.rw0frw.aps1.cache.amazonaws.com:6379 \
           -n $NAMESPACE \
@@ -69,19 +84,27 @@ jobs:
     # ---------------- DEPLOY ----------------
     - name: Deploy App
       run: |
+        set -e
         kubectl apply -f deployments/kubernetes/api-deployment.yaml
         kubectl apply -f deployments/kubernetes/worker-deployment.yaml
         kubectl apply -f deployments/kubernetes/service.yaml
 
+    # ---------------- DEBUG PODS ----------------
+    - name: Show pods
+      run: |
+        kubectl get pods -n $NAMESPACE -o wide
+
     # ---------------- WAIT FOR ROLLOUT ----------------
     - name: Wait for deployments
       run: |
+        set -e
         kubectl rollout status deployment/api -n $NAMESPACE --timeout=180s
         kubectl rollout status deployment/worker -n $NAMESPACE --timeout=180s
 
     # ---------------- GET LOADBALANCER ----------------
     - name: Get External IP
       run: |
+        set -e
         echo "Waiting for LoadBalancer..."
         for i in {1..40}; do
           HOST=$(kubectl get svc api -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
@@ -90,18 +113,34 @@ jobs:
             echo "Found: $HOST"
             exit 0
           fi
+          echo "Waiting..."
           sleep 10
         done
-        echo "Failed to get external IP"
+        echo "ERROR: LoadBalancer not ready"
+        kubectl get svc -n $NAMESPACE
         exit 1
 
     # ---------------- HEALTH CHECK ----------------
     - name: Health Check
       run: |
+        set -e
         curl -f $API_URL/health
 
-    # ---------------- RUN FULL TEST SUITE ----------------
+    # ---------------- DEBUG IF FAIL ----------------
+    - name: Debug (on failure)
+      if: failure()
+      run: |
+        echo "==== PODS ===="
+        kubectl get pods -n $NAMESPACE
+        echo "==== DESCRIBE ===="
+        kubectl describe pods -n $NAMESPACE
+        echo "==== LOGS ===="
+        kubectl logs -l app=api -n $NAMESPACE --tail=50 || true
+        kubectl logs -l app=worker -n $NAMESPACE --tail=50 || true
+
+    # ---------------- TEST ----------------
     - name: Run Integration Tests
       run: |
+        set -e
         chmod +x test.sh
         BASE_URL=$API_URL ./test.sh
