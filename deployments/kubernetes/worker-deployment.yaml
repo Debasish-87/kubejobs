@@ -38,7 +38,6 @@ spec:
       securityContext:
         fsGroup: 1000
         runAsNonRoot: true
-        # Required by PodSecurity restricted policy
         seccompProfile:
           type: RuntimeDefault
 
@@ -62,6 +61,12 @@ spec:
                   name: app-config
                   key: REDIS_ADDR
 
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: app-config
+                  key: REDIS_PASSWORD
+
             - name: MAX_RETRY
               value: "3"
 
@@ -84,7 +89,7 @@ spec:
               cpu: "100m"
               memory: "128Mi"
             limits:
-              cpu: "400m"   # ratio = 4 (limit-range max is 4)
+              cpu: "400m"
               memory: "512Mi"
 
           startupProbe:
@@ -99,7 +104,7 @@ spec:
             httpGet:
               path: /health
               port: 8081
-            initialDelaySeconds: 5
+            initialDelaySeconds: 15
             periodSeconds: 10
             timeoutSeconds: 3
             failureThreshold: 3
@@ -109,7 +114,7 @@ spec:
             httpGet:
               path: /health
               port: 8081
-            initialDelaySeconds: 15
+            initialDelaySeconds: 20
             periodSeconds: 15
             timeoutSeconds: 3
             failureThreshold: 5
@@ -127,7 +132,6 @@ spec:
             capabilities:
               drop:
                 - ALL
-            # Required by PodSecurity restricted policy
             seccompProfile:
               type: RuntimeDefault
 

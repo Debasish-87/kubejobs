@@ -9,6 +9,8 @@ spec:
       name: app-config
       key: REDIS_PASSWORD
 
+---
+
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
@@ -21,8 +23,12 @@ spec:
   minReplicaCount: 2
   maxReplicaCount: 50
 
-  pollingInterval: 5      
-  cooldownPeriod: 30      
+  pollingInterval: 5
+  cooldownPeriod: 30
+
+  fallback:
+    failureThreshold: 3
+    replicas: 2
 
   advanced:
     restoreToOriginalReplicaCount: false
@@ -47,12 +53,8 @@ spec:
         address: "master.kubejobs-redis.rw0frw.aps1.cache.amazonaws.com:6379"
         stream: jobs_stream
         consumerGroup: workers
-
         lagThreshold: "100"
-
         activationLagThreshold: "10"
-
         enableTLS: "true"
-
       authenticationRef:
         name: redis-auth

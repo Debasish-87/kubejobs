@@ -61,4 +61,8 @@ resource "aws_elasticache_replication_group" "redis" {
   maintenance_window       = "sun:05:00-sun:06:00"
 
   tags = { Name = "kubejobs-redis" }
+    lifecycle {
+    prevent_destroy = true
+  }
 }
+

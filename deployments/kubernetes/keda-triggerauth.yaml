@@ -1,0 +1,10 @@
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: redis-auth
+  namespace: kubejobs
+spec:
+  secretTargetRef:
+    - parameter: password
+      name: app-config
+      key: REDIS_PASSWORD
