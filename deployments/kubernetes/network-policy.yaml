@@ -6,21 +6,30 @@ metadata:
 
 spec:
   podSelector: {}
-
   policyTypes:
     - Ingress
     - Egress
 
   ingress:
     - from:
-        - podSelector: {}
+        - podSelector:
+            matchLabels:
+              app: api
+
+    - from:
+        - podSelector:
+            matchLabels:
+              app: worker
 
   egress:
-    # Allow internal cluster communication
     - to:
-        - podSelector: {}
+        - podSelector:
+            matchLabels:
+              app: api
+        - podSelector:
+            matchLabels:
+              app: worker
 
-    # Allow DNS (VERY IMPORTANT)
     - to:
         - namespaceSelector:
             matchLabels:
@@ -31,10 +40,9 @@ spec:
         - protocol: TCP
           port: 53
 
-    # Allow Redis (AWS ElastiCache)
     - to:
         - ipBlock:
-            cidr: 0.0.0.0/0   # tighten later with exact CIDR
+            cidr: 0.0.0.0/0
       ports:
         - protocol: TCP
           port: 6379

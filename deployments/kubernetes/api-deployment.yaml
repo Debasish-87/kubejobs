@@ -5,6 +5,7 @@ metadata:
   namespace: kubejobs
   labels:
     app: api
+    component: backend
 
 spec:
   replicas: 2
@@ -14,14 +15,25 @@ spec:
     matchLabels:
       app: api
 
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+
   template:
     metadata:
       labels:
         app: api
+        component: backend
 
     spec:
       serviceAccountName: kubejobs-sa
-      terminationGracePeriodSeconds: 15
+      terminationGracePeriodSeconds: 20
+
+      securityContext:
+        fsGroup: 1000
+        runAsNonRoot: true
 
       containers:
         - name: api
@@ -29,7 +41,8 @@ spec:
           imagePullPolicy: Always
 
           ports:
-            - containerPort: 8080
+            - name: http
+              containerPort: 8080
 
           env:
             - name: APP_MODE
@@ -48,7 +61,7 @@ spec:
               value: "3"
 
             - name: LOG_LEVEL
-              value: "debug"
+              value: "info"   # debug → production में info
 
           resources:
             requests:
@@ -58,16 +71,17 @@ spec:
               cpu: "500m"
               memory: "512Mi"
 
+          # ---------------- HEALTH ----------------
           startupProbe:
             httpGet:
               path: /health
               port: 8080
-            failureThreshold: 10
+            failureThreshold: 30
             periodSeconds: 3
 
           readinessProbe:
             httpGet:
-              path: /ready
+              path: /health
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 5
@@ -78,21 +92,32 @@ spec:
             httpGet:
               path: /health
               port: 8080
-            initialDelaySeconds: 10
+            initialDelaySeconds: 15
             periodSeconds: 10
             timeoutSeconds: 2
             failureThreshold: 3
 
+          # ---------------- GRACEFUL SHUTDOWN ----------------
           lifecycle:
             preStop:
               exec:
                 command: ["sh", "-c", "sleep 10"]
 
+          # ---------------- SECURITY ----------------
           securityContext:
             runAsNonRoot: true
             runAsUser: 1000
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
 
-      securityContext:
-        fsGroup: 1000
+      # ---------------- HIGH AVAILABILITY ----------------
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: api

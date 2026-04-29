@@ -13,13 +13,17 @@ spec:
         memory: "512Mi"
 
       defaultRequest:
-        cpu: "100m"
-        memory: "128Mi"
+        cpu: "150m"
+        memory: "192Mi"
 
       max:
         cpu: "1"
         memory: "1Gi"
 
       min:
-        cpu: "50m"
-        memory: "64Mi"
+        cpu: "100m"
+        memory: "128Mi"
+
+      maxLimitRequestRatio:
+        cpu: "4"
+        memory: "4"

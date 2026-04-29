@@ -6,7 +6,6 @@ metadata:
   labels:
     app: worker
     component: backend
-    version: latest
 
 spec:
   replicas: 3
@@ -26,7 +25,8 @@ spec:
     metadata:
       labels:
         app: worker
-        version: latest
+        component: backend
+
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8081"
@@ -35,6 +35,10 @@ spec:
     spec:
       serviceAccountName: kubejobs-sa
       terminationGracePeriodSeconds: 60
+
+      securityContext:
+        fsGroup: 1000
+        runAsNonRoot: true
 
       containers:
         - name: worker
@@ -66,7 +70,7 @@ spec:
               value: "info"
 
             - name: WORKER_CONCURRENCY
-              value: "5"
+              value: "2"
 
             - name: WORKER_ID
               valueFrom:
@@ -75,12 +79,13 @@ spec:
 
           resources:
             requests:
-              cpu: "100m"
-              memory: "128Mi"
+              cpu: "200m"
+              memory: "256Mi"
             limits:
               cpu: "500m"
               memory: "512Mi"
 
+          # ---------------- HEALTH ----------------
           startupProbe:
             httpGet:
               path: /health
@@ -102,7 +107,7 @@ spec:
             httpGet:
               path: /health
               port: 8081
-            initialDelaySeconds: 15
+            initialDelaySeconds: 20
             periodSeconds: 15
             timeoutSeconds: 3
             failureThreshold: 5
@@ -110,8 +115,9 @@ spec:
           lifecycle:
             preStop:
               exec:
-                command: ["sh", "-c", "sleep 15"]
+                command: ["sh", "-c", "sleep 20"]
 
+          # ---------------- SECURITY ----------------
           securityContext:
             runAsNonRoot: true
             runAsUser: 1000
@@ -120,10 +126,6 @@ spec:
             capabilities:
               drop:
                 - ALL
-
-      securityContext:
-        fsGroup: 1000
-        runAsNonRoot: true
 
       topologySpreadConstraints:
         - maxSkew: 1

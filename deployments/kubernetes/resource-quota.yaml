@@ -7,13 +7,15 @@ metadata:
 spec:
   hard:
     requests.cpu: "4"
-    requests.memory: "4Gi"
+    requests.memory: "5Gi"
 
-    limits.cpu: "6"
-    limits.memory: "6Gi"
+    limits.cpu: "8"
+    limits.memory: "8Gi"
 
-    pods: "30"
+    pods: "50"
 
     services: "10"
-    configmaps: "20"
-    secrets: "20"
+    configmaps: "30"
+    secrets: "30"
+
+    persistentvolumeclaims: "5"

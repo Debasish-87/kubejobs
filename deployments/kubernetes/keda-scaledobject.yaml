@@ -11,8 +11,8 @@ spec:
   minReplicaCount: 2
   maxReplicaCount: 50
 
-  pollingInterval: 2
-  cooldownPeriod: 15
+  pollingInterval: 5          # safer
+  cooldownPeriod: 30          # stable scaling
 
   advanced:
     restoreToOriginalReplicaCount: false
@@ -20,7 +20,8 @@ spec:
   triggers:
     - type: redis-streams
       metadata:
-        address: master.kubejobs-redis.rw0frw.aps1.cache.amazonaws.com:6379
+        address: rediss://master.kubejobs-redis.rw0frw.aps1.cache.amazonaws.com:6379
+
         stream: jobs_stream
         consumerGroup: workers
 

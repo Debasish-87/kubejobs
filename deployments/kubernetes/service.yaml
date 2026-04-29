@@ -7,6 +7,13 @@ metadata:
     app: api
     component: backend
 
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: "/health"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "traffic-port"
+
 spec:
   type: LoadBalancer
 
@@ -17,3 +24,7 @@ spec:
     - name: http
       port: 80
       targetPort: 8080
+      protocol: TCP
+
+  externalTrafficPolicy: Cluster
+  sessionAffinity: None

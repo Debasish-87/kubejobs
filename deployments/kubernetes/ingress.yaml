@@ -3,33 +3,22 @@ kind: Ingress
 metadata:
   name: kubejobs-ingress
   namespace: kubejobs
-  labels:
-    app: api
-    component: ingress
 
   annotations:
-    kubernetes.io/ingress.class: nginx
+    kubernetes.io/ingress.class: alb
 
-    nginx.ingress.kubernetes.io/rewrite-target: /
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
 
-    nginx.ingress.kubernetes.io/proxy-connect-timeout: "5"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "10"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "10"
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
 
-    nginx.ingress.kubernetes.io/limit-rps: "200"
-    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
-
-    nginx.ingress.kubernetes.io/configuration-snippet: |
-      more_set_headers "X-Content-Type-Options: nosniff";
-      more_set_headers "X-Frame-Options: DENY";
-      more_set_headers "X-XSS-Protection: 1; mode=block";
+    alb.ingress.kubernetes.io/healthcheck-path: /health
 
 spec:
-  ingressClassName: nginx
+  ingressClassName: alb
 
   rules:
-    - host: kubejobs.local
-      http:
+    - http:
         paths:
           - path: /
             pathType: Prefix
