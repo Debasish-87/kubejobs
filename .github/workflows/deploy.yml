@@ -58,7 +58,6 @@ jobs:
           --name $CLUSTER_NAME \
           --kubeconfig $HOME/.kube/config
 
-        # Persist KUBECONFIG for ALL subsequent steps
         echo "KUBECONFIG=$HOME/.kube/config" >> $GITHUB_ENV
 
         echo "=== Current context ==="
@@ -137,9 +136,10 @@ jobs:
       run: |
         set -euo pipefail
 
-        # app-config — REDIS_ADDR (TLS) + REDIS_PASSWORD (used by KEDA TriggerAuth)
+        # REDIS_ADDR — sirf host:port (Go code khud TLS handle karta hai)
+        # REDIS_PASSWORD — KEDA TriggerAuthentication ke liye bhi chahiye
         kubectl create secret generic app-config \
-          --from-literal=REDIS_ADDR=rediss://master.kubejobs-redis.rw0frw.aps1.cache.amazonaws.com:6379 \
+          --from-literal=REDIS_ADDR=master.kubejobs-redis.rw0frw.aps1.cache.amazonaws.com:6379 \
           --from-literal=REDIS_PASSWORD=${{ secrets.REDIS_PASSWORD }} \
           -n $NAMESPACE \
           --dry-run=client -o yaml | kubectl apply -f -
