@@ -6,25 +6,29 @@ metadata:
   labels:
     app: api
     component: backend
-
   annotations:
     service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
     service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
 
     service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: "/health"
     service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "traffic-port"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: "HTTP"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-interval: "10"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-timeout: "5"
+    service.beta.kubernetes.io/aws-load-balancer-healthy-threshold: "2"
+    service.beta.kubernetes.io/aws-load-balancer-unhealthy-threshold: "3"
+
+    service.beta.kubernetes.io/aws-load-balancer-connection-idle-timeout: "60"
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
 
 spec:
   type: LoadBalancer
-
   selector:
     app: api
-
   ports:
     - name: http
       port: 80
       targetPort: 8080
       protocol: TCP
-
   externalTrafficPolicy: Cluster
   sessionAffinity: None

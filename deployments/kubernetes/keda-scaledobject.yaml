@@ -1,9 +1,19 @@
 apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: redis-auth
+  namespace: kubejobs
+spec:
+  secretTargetRef:
+    - parameter: password
+      name: app-config
+      key: REDIS_PASSWORD
+
+apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
   name: worker-scaler
   namespace: kubejobs
-
 spec:
   scaleTargetRef:
     name: worker
@@ -11,19 +21,38 @@ spec:
   minReplicaCount: 2
   maxReplicaCount: 50
 
-  pollingInterval: 5          # safer
-  cooldownPeriod: 30          # stable scaling
+  pollingInterval: 5      
+  cooldownPeriod: 30      
 
   advanced:
     restoreToOriginalReplicaCount: false
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 15
+          policies:
+            - type: Pods
+              value: 4
+              periodSeconds: 15
+        scaleDown:
+          stabilizationWindowSeconds: 60
+          policies:
+            - type: Percent
+              value: 50
+              periodSeconds: 30
 
   triggers:
     - type: redis-streams
       metadata:
-        address: rediss://master.kubejobs-redis.rw0frw.aps1.cache.amazonaws.com:6379
-
+        address: "master.kubejobs-redis.rw0frw.aps1.cache.amazonaws.com:6379"
         stream: jobs_stream
         consumerGroup: workers
 
         lagThreshold: "100"
+
         activationLagThreshold: "10"
+
+        enableTLS: "true"
+
+      authenticationRef:
+        name: redis-auth
