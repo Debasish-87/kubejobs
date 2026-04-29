@@ -5,18 +5,20 @@ metadata:
   namespace: kubejobs
 
 spec:
+  # Apply policy to all pods in this namespace
   podSelector: {}
+
+  # Enforce both ingress and egress rules
   policyTypes:
     - Ingress
     - Egress
 
   ingress:
+    # Allow traffic ONLY from API and Worker pods (internal communication)
     - from:
         - podSelector:
             matchLabels:
               app: api
-
-    - from:
         - podSelector:
             matchLabels:
               app: worker
@@ -42,7 +44,7 @@ spec:
 
     - to:
         - ipBlock:
-            cidr: 0.0.0.0/0
+            cidr: 10.0.0.0/16   
       ports:
         - protocol: TCP
-          port: 6379
+          port: 6380

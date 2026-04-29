@@ -1,3 +1,6 @@
+################################################################
+FILE PATH: ./.github/workflows/deploy.yml
+################################################################
 name: KubeJobs Production Deploy
 
 on:
@@ -136,6 +139,8 @@ jobs:
       run: |
         set -euo pipefail
 
+        # REDIS_ADDR — sirf host:port (Go code khud TLS handle karta hai)
+        # REDIS_PASSWORD — KEDA TriggerAuthentication ke liye bhi chahiye
         kubectl create secret generic app-config \
           --from-literal=REDIS_ADDR=master.kubejobs-redis.rw0frw.aps1.cache.amazonaws.com:6380 \
           --from-literal=REDIS_PASSWORD=${{ secrets.REDIS_PASSWORD }} \
@@ -244,10 +249,10 @@ jobs:
         echo "╔══════════════════════════════════════════════════╗"
         echo "║         KubeJobs Deploy — SUCCESS                ║"
         echo "╠══════════════════════════════════════════════════╣"
-        echo "║  Cluster  : $CLUSTER_NAME                        ║"
-        echo "║  Namespace: $NAMESPACE                           ║"
-        echo "║  Image    : $ECR_REPO:$IMAGE_TAG                 ║"
-        echo "║  API URL  : $API_URL                             ║"
+        echo "║  Cluster  : $CLUSTER_NAME"
+        echo "║  Namespace: $NAMESPACE"
+        echo "║  Image    : $ECR_REPO:$IMAGE_TAG"
+        echo "║  API URL  : $API_URL"
         echo "╚══════════════════════════════════════════════════╝"
         echo ""
         kubectl get pods -n $NAMESPACE
@@ -293,4 +298,6 @@ jobs:
 
         echo ""
         echo "=== KEDA operator logs ==="
-        kubectl logs -l app=keda-operator -n keda --tail=50 || true
+        kubectl logs -l app=keda-operator -n keda --tail=50 || true-e 
+
+
