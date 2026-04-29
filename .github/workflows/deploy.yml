@@ -38,23 +38,33 @@ jobs:
     - name: Build & Push Image
       run: |
         set -e
-
         docker build -f deployments/docker/Dockerfile -t kubejobs:${{ github.sha }} .
-
         docker tag kubejobs:${{ github.sha }} $ECR_REPO:${{ github.sha }}
         docker tag kubejobs:${{ github.sha }} $ECR_REPO:latest
-
         docker push $ECR_REPO:${{ github.sha }}
         docker push $ECR_REPO:latest
 
-    - name: Setup kubeconfig
+    - name: Setup kubeconfig (FIXED)
       run: |
+        set -e
+
         aws eks update-kubeconfig \
           --region $AWS_REGION \
-          --name $CLUSTER_NAME
+          --name $CLUSTER_NAME \
+          --kubeconfig kubeconfig
+
+        export KUBECONFIG=$PWD/kubeconfig
+
+        echo "==== CONTEXT ===="
+        kubectl config current-context
+
+        echo "==== CLUSTER ===="
+        kubectl cluster-info
 
     - name: Verify cluster access
       run: kubectl get nodes
+      env:
+        KUBECONFIG: ${{ github.workspace }}/kubeconfig
 
     - name: Apply base configs
       run: |
@@ -63,14 +73,17 @@ jobs:
         kubectl apply -f deployments/kubernetes/limit-range.yaml
         kubectl apply -f deployments/kubernetes/resource-quota.yaml
         kubectl apply -f deployments/kubernetes/network-policy.yaml
+      env:
+        KUBECONFIG: ${{ github.workspace }}/kubeconfig
 
-    # ---------------- SECRET ----------------
     - name: Apply secret
       run: |
         kubectl create secret generic app-config \
           --from-literal=REDIS_ADDR=rediss://master.kubejobs-redis.rw0frw.aps1.cache.amazonaws.com:6379 \
           -n $NAMESPACE \
           --dry-run=client -o yaml | kubectl apply -f -
+      env:
+        KUBECONFIG: ${{ github.workspace }}/kubeconfig
 
     - name: Apply workloads
       run: |
@@ -78,44 +91,44 @@ jobs:
         kubectl apply -f deployments/kubernetes/worker-deployment.yaml
         kubectl apply -f deployments/kubernetes/service.yaml
         kubectl apply -f deployments/kubernetes/keda-scaledobject.yaml
+      env:
+        KUBECONFIG: ${{ github.workspace }}/kubeconfig
 
-    - name: Update image (atomic)
+    - name: Update image
       run: |
         kubectl set image deployment/api api=$ECR_REPO:${{ github.sha }} -n $NAMESPACE
         kubectl set image deployment/worker worker=$ECR_REPO:${{ github.sha }} -n $NAMESPACE
+      env:
+        KUBECONFIG: ${{ github.workspace }}/kubeconfig
 
-    - name: Wait for rollout
+    - name: Wait rollout
       run: |
         kubectl rollout status deployment/api -n $NAMESPACE --timeout=180s
         kubectl rollout status deployment/worker -n $NAMESPACE --timeout=180s
+      env:
+        KUBECONFIG: ${{ github.workspace }}/kubeconfig
 
     - name: Verify pods
-      run: |
-        kubectl get pods -n $NAMESPACE -o wide
+      run: kubectl get pods -n $NAMESPACE -o wide
+      env:
+        KUBECONFIG: ${{ github.workspace }}/kubeconfig
 
-    - name: Get LoadBalancer URL
+    - name: Get LoadBalancer
       run: |
-        echo "Waiting for LoadBalancer..."
-
         for i in {1..40}; do
           HOST=$(kubectl get svc api -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-
           if [ -n "$HOST" ]; then
             echo "API_URL=http://$HOST" >> $GITHUB_ENV
-            echo "API URL: $HOST"
             exit 0
           fi
-
           sleep 10
         done
-
-        echo "LoadBalancer not ready"
-        kubectl get svc -n $NAMESPACE
         exit 1
+      env:
+        KUBECONFIG: ${{ github.workspace }}/kubeconfig
 
     - name: Health check
-      run: |
-        curl -f $API_URL/health
+      run: curl -f $API_URL/health
 
     - name: Run integration test
       run: |
@@ -125,12 +138,9 @@ jobs:
     - name: Debug (on failure)
       if: failure()
       run: |
-        echo "==== PODS ===="
         kubectl get pods -n $NAMESPACE
-
-        echo "==== DESCRIBE ===="
         kubectl describe pods -n $NAMESPACE
-
-        echo "==== LOGS ===="
         kubectl logs -l app=api -n $NAMESPACE --tail=100 || true
         kubectl logs -l app=worker -n $NAMESPACE --tail=100 || true
+      env:
+        KUBECONFIG: ${{ github.workspace }}/kubeconfig
