@@ -48,19 +48,23 @@ jobs:
       run: |
         set -e
 
+        # Ensure default kube dir
+        mkdir -p ~/.kube
+
+        # Generate kubeconfig at DEFAULT location
         aws eks update-kubeconfig \
           --region $AWS_REGION \
-          --name $CLUSTER_NAME \
-          --kubeconfig kubeconfig
+          --name $CLUSTER_NAME
 
-        echo "KUBECONFIG=$PWD/kubeconfig" >> $GITHUB_ENV
-
-        echo "==== CONTEXT ===="
+        echo "==== CURRENT CONTEXT ===="
         kubectl config current-context
 
-        echo "==== CLUSTER ===="
+        echo "==== CLUSTER INFO ===="
         kubectl cluster-info
 
+        echo "==== NODES ===="
+        kubectl get nodes
+        
     - name: Verify cluster access
       run: kubectl get nodes
 
