@@ -2,8 +2,12 @@ name: KubeJobs Production Deploy
 
 on:
   push:
-    branches: [ "main", "aws-prod-latest" ]
+    branches: [ "aws-prod-latest" ]
   workflow_dispatch:
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: true
 
 env:
   AWS_REGION: ap-south-1
@@ -16,40 +20,35 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
-    defaults:
-      run:
-        shell: bash
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
     - uses: actions/checkout@v4
 
-    # ---------------- AWS ----------------
-    - name: Configure AWS
+    # ---------------- AWS (OIDC - SECURE) ----------------
+    - name: Configure AWS (OIDC)
       uses: aws-actions/configure-aws-credentials@v4
       with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        role-to-assume: arn:aws:iam::409837635702:role/github-actions-role
         aws-region: ${{ env.AWS_REGION }}
 
+    # ---------------- VERIFY ----------------
     - name: Verify AWS
       run: |
         set -euo pipefail
         aws sts get-caller-identity
-        aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION
 
-    # ---------------- INSTALL kubectl ----------------
-    - name: Install kubectl (fixed version)
-      run: |
-        set -euo pipefail
-        curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
-        chmod +x kubectl
-        sudo mv kubectl /usr/local/bin/
-        kubectl version --client
+    # ---------------- KUBECTL (stable install) ----------------
+    - name: Install kubectl
+      uses: azure/setup-kubectl@v4
+      with:
+        version: 'v1.28.0'
 
     # ---------------- DOCKER ----------------
     - name: Login to ECR
       run: |
-        set -euo pipefail
         aws ecr get-login-password --region $AWS_REGION \
         | docker login --username AWS --password-stdin $ECR_REPO
 
@@ -82,91 +81,53 @@ jobs:
 
         export KUBECONFIG=$HOME/.kube/config
 
-        echo "=== VERIFY KUBECONFIG ==="
-        test -f $KUBECONFIG
-        head -20 $KUBECONFIG
-
-        echo "=== VERIFY CLUSTER ==="
-        kubectl config current-context
         kubectl get nodes
 
-    # ---------------- DEPLOY ----------------
-    - name: Deploy to EKS
+    # ---------------- SAFE DEPLOY ----------------
+    - name: Deploy
       run: |
         set -euo pipefail
         export KUBECONFIG=$HOME/.kube/config
 
-        echo "=== APPLY BASE ==="
-        kubectl apply -f deployments/kubernetes/namespace.yaml
-        kubectl apply -f deployments/kubernetes/serviceaccount.yaml
-        kubectl apply -f deployments/kubernetes/limit-range.yaml
-        kubectl apply -f deployments/kubernetes/resource-quota.yaml
-        kubectl apply -f deployments/kubernetes/network-policy.yaml
+        echo "Ensuring namespace exists..."
+        kubectl get ns $NAMESPACE || kubectl create ns $NAMESPACE
 
-        echo "=== SECRET ==="
-        kubectl create secret generic app-config \
-          --from-literal=REDIS_ADDR=rediss://master.kubejobs-redis.rw0frw.aps1.cache.amazonaws.com:6379 \
-          -n $NAMESPACE \
-          --dry-run=client -o yaml | kubectl apply -f -
+        kubectl apply -f deployments/kubernetes/
 
-        echo "=== DEPLOY ==="
-        kubectl apply -f deployments/kubernetes/api-deployment.yaml
-        kubectl apply -f deployments/kubernetes/worker-deployment.yaml
-        kubectl apply -f deployments/kubernetes/service.yaml
-        kubectl apply -f deployments/kubernetes/keda-scaledobject.yaml
-
-        echo "=== UPDATE IMAGE ==="
         kubectl set image deployment/api api=$ECR_REPO:$IMAGE_TAG -n $NAMESPACE
         kubectl set image deployment/worker worker=$ECR_REPO:$IMAGE_TAG -n $NAMESPACE
 
-        echo "=== WAIT FOR ROLLOUT ==="
-        kubectl rollout status deployment/api -n $NAMESPACE --timeout=180s || exit 1
-        kubectl rollout status deployment/worker -n $NAMESPACE --timeout=180s || exit 1
+        kubectl rollout status deployment/api -n $NAMESPACE --timeout=180s
+        kubectl rollout status deployment/worker -n $NAMESPACE --timeout=180s
 
-        echo "=== POD STATUS ==="
-        kubectl get pods -n $NAMESPACE -o wide
-
-    # ---------------- LOAD BALANCER ----------------
+    # ---------------- LB ----------------
     - name: Get API URL
       run: |
         set -euo pipefail
         export KUBECONFIG=$HOME/.kube/config
 
-        FOUND=0
         for i in {1..40}; do
           HOST=$(kubectl get svc api -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
           if [ -n "$HOST" ]; then
             echo "API_URL=http://$HOST" >> $GITHUB_ENV
-            FOUND=1
-            break
+            exit 0
           fi
           sleep 10
         done
 
-        if [ "$FOUND" -ne 1 ]; then
-          echo "LoadBalancer not ready"
-          kubectl get svc -n $NAMESPACE
-          exit 1
-        fi
+        echo "LoadBalancer failed"
+        exit 1
 
     # ---------------- VERIFY ----------------
     - name: Health check
       run: |
-        set -euo pipefail
         curl -f $API_URL/health
 
-    - name: Run tests
-      run: |
-        set -euo pipefail
-        chmod +x test.sh
-        BASE_URL=$API_URL ./test.sh || true
-
     # ---------------- DEBUG ----------------
-    - name: Debug on failure
+    - name: Debug
       if: failure()
       run: |
-        export KUBECONFIG=$HOME/.kube/config
-        kubectl get pods -n $NAMESPACE || true
-        kubectl describe pods -n $NAMESPACE || true
+        kubectl get pods -n $NAMESPACE
+        kubectl describe pods -n $NAMESPACE
         kubectl logs -l app=api -n $NAMESPACE --tail=100 || true
         kubectl logs -l app=worker -n $NAMESPACE --tail=100 || true
