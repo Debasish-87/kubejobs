@@ -1,4 +1,4 @@
-# Terraform (exclude from Docker, NOT from Git)
+# Terraform
 .terraform/
 **/.terraform/*
 *.tfstate
@@ -21,6 +21,4 @@ bin/
 *.log
 *.tmp
 
-# Large / unnecessary
 scripts/
-final_project_full_dump.txt

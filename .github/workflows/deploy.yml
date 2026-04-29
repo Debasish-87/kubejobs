@@ -37,11 +37,13 @@ jobs:
         aws sts get-caller-identity
         aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION
 
-    # ---------------- kubectl ----------------
-    - name: Verify kubectl
+    # ---------------- INSTALL kubectl ----------------
+    - name: Install kubectl (fixed version)
       run: |
         set -euo pipefail
-        which kubectl
+        curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+        chmod +x kubectl
+        sudo mv kubectl /usr/local/bin/
         kubectl version --client
 
     # ---------------- DOCKER ----------------
@@ -57,7 +59,7 @@ jobs:
 
         IMAGE_TAG=${{ github.sha }}
 
-        docker build -f deployments/docker/Dockerfile -t kubejobs:$IMAGE_TAG .
+        docker build --no-cache -f deployments/docker/Dockerfile -t kubejobs:$IMAGE_TAG .
         docker tag kubejobs:$IMAGE_TAG $ECR_REPO:$IMAGE_TAG
         docker tag kubejobs:$IMAGE_TAG $ECR_REPO:latest
 
@@ -66,7 +68,7 @@ jobs:
 
         echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
 
-    # ---------------- KUBECONFIG (SEPARATE HARD CHECK) ----------------
+    # ---------------- KUBECONFIG ----------------
     - name: Setup kubeconfig
       run: |
         set -euo pipefail
@@ -80,11 +82,11 @@ jobs:
 
         export KUBECONFIG=$HOME/.kube/config
 
-        echo "=== VERIFY KUBECONFIG FILE ==="
+        echo "=== VERIFY KUBECONFIG ==="
         test -f $KUBECONFIG
-        cat $KUBECONFIG | head -20
+        head -20 $KUBECONFIG
 
-        echo "=== VERIFY CLUSTER ACCESS ==="
+        echo "=== VERIFY CLUSTER ==="
         kubectl config current-context
         kubectl get nodes
 
@@ -118,8 +120,8 @@ jobs:
         kubectl set image deployment/worker worker=$ECR_REPO:$IMAGE_TAG -n $NAMESPACE
 
         echo "=== WAIT FOR ROLLOUT ==="
-        kubectl rollout status deployment/api -n $NAMESPACE --timeout=180s
-        kubectl rollout status deployment/worker -n $NAMESPACE --timeout=180s
+        kubectl rollout status deployment/api -n $NAMESPACE --timeout=180s || exit 1
+        kubectl rollout status deployment/worker -n $NAMESPACE --timeout=180s || exit 1
 
         echo "=== POD STATUS ==="
         kubectl get pods -n $NAMESPACE -o wide
@@ -130,17 +132,22 @@ jobs:
         set -euo pipefail
         export KUBECONFIG=$HOME/.kube/config
 
+        FOUND=0
         for i in {1..40}; do
           HOST=$(kubectl get svc api -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
           if [ -n "$HOST" ]; then
             echo "API_URL=http://$HOST" >> $GITHUB_ENV
-            exit 0
+            FOUND=1
+            break
           fi
           sleep 10
         done
 
-        kubectl get svc -n $NAMESPACE
-        exit 1
+        if [ "$FOUND" -ne 1 ]; then
+          echo "LoadBalancer not ready"
+          kubectl get svc -n $NAMESPACE
+          exit 1
+        fi
 
     # ---------------- VERIFY ----------------
     - name: Health check
