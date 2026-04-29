@@ -3,8 +3,6 @@ name: KubeJobs Production Deploy
 on:
   push:
     branches: [ "main", "aws-prod-latest" ]
-    tags:
-      - "v*"
   workflow_dispatch:
 
 env:
@@ -20,7 +18,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # ---------------- AWS AUTH ----------------
+    # ---------------- AWS ----------------
     - name: Configure AWS
       uses: aws-actions/configure-aws-credentials@v4
       with:
@@ -32,10 +30,18 @@ jobs:
       run: |
         set -e
         aws sts get-caller-identity
-        test -n "$AWS_REGION"
-        test -n "$CLUSTER_NAME"
+        aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION
 
-    # ---------------- BUILD ----------------
+    # ---------------- INSTALL kubectl ----------------
+    - name: Install kubectl
+      run: |
+        set -e
+        curl -o kubectl https://s3.us-west-2.amazonaws.com/amazon-eks/1.28.0/2024-01-04/bin/linux/amd64/kubectl
+        chmod +x kubectl
+        sudo mv kubectl /usr/local/bin/
+        kubectl version --client
+
+    # ---------------- DOCKER ----------------
     - name: Login to ECR
       run: |
         set -e
@@ -51,8 +57,8 @@ jobs:
         docker push $ECR_REPO:${{ github.sha }}
         docker push $ECR_REPO:latest
 
-    # ---------------- K8s (ATOMIC BLOCK) ----------------
-    - name: Deploy to EKS (atomic)
+    # ---------------- DEPLOY ----------------
+    - name: Deploy to EKS
       run: |
         set -e
 
@@ -62,6 +68,10 @@ jobs:
           --name $CLUSTER_NAME
 
         export KUBECONFIG=$HOME/.kube/config
+
+        echo "=== DEBUG KUBECONFIG ==="
+        ls -la ~/.kube
+        cat ~/.kube/config | head -20
 
         echo "=== VERIFY CLUSTER ==="
         kubectl config current-context
@@ -95,10 +105,10 @@ jobs:
         kubectl rollout status deployment/api -n $NAMESPACE --timeout=180s
         kubectl rollout status deployment/worker -n $NAMESPACE --timeout=180s
 
-        echo "=== POD STATUS ==="
+        echo "=== PODS ==="
         kubectl get pods -n $NAMESPACE -o wide
 
-        echo "=== WAIT FOR LB ==="
+        echo "=== WAIT FOR LOADBALANCER ==="
         for i in {1..40}; do
           HOST=$(kubectl get svc api -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
           if [ -n "$HOST" ]; then
@@ -123,11 +133,11 @@ jobs:
         BASE_URL=$API_URL ./test.sh || true
 
     # ---------------- DEBUG ----------------
-    - name: Dump logs on failure
+    - name: Debug on failure
       if: failure()
       run: |
         export KUBECONFIG=$HOME/.kube/config
-        kubectl get pods -n $NAMESPACE
-        kubectl describe pods -n $NAMESPACE
+        kubectl get pods -n $NAMESPACE || true
+        kubectl describe pods -n $NAMESPACE || true
         kubectl logs -l app=api -n $NAMESPACE --tail=100 || true
         kubectl logs -l app=worker -n $NAMESPACE --tail=100 || true
