@@ -66,12 +66,10 @@ jobs:
 
         echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
 
-    # ---------------- DEPLOY (CRITICAL FIXED BLOCK) ----------------
-    - name: Deploy to EKS
+    # ---------------- KUBECONFIG (SEPARATE HARD CHECK) ----------------
+    - name: Setup kubeconfig
       run: |
         set -euo pipefail
-
-        echo "=== SETUP KUBECONFIG ==="
 
         mkdir -p $HOME/.kube
 
@@ -82,13 +80,19 @@ jobs:
 
         export KUBECONFIG=$HOME/.kube/config
 
-        echo "=== VERIFY FILE ==="
-        ls -la $HOME/.kube
-        cat $HOME/.kube/config
+        echo "=== VERIFY KUBECONFIG FILE ==="
+        test -f $KUBECONFIG
+        cat $KUBECONFIG | head -20
 
-        echo "=== VERIFY CLUSTER ==="
+        echo "=== VERIFY CLUSTER ACCESS ==="
         kubectl config current-context
         kubectl get nodes
+
+    # ---------------- DEPLOY ----------------
+    - name: Deploy to EKS
+      run: |
+        set -euo pipefail
+        export KUBECONFIG=$HOME/.kube/config
 
         echo "=== APPLY BASE ==="
         kubectl apply -f deployments/kubernetes/namespace.yaml
@@ -120,17 +124,23 @@ jobs:
         echo "=== POD STATUS ==="
         kubectl get pods -n $NAMESPACE -o wide
 
-        echo "=== WAIT FOR LOADBALANCER ==="
+    # ---------------- LOAD BALANCER ----------------
+    - name: Get API URL
+      run: |
+        set -euo pipefail
+        export KUBECONFIG=$HOME/.kube/config
+
         for i in {1..40}; do
           HOST=$(kubectl get svc api -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
           if [ -n "$HOST" ]; then
             echo "API_URL=http://$HOST" >> $GITHUB_ENV
-            break
+            exit 0
           fi
           sleep 10
         done
 
         kubectl get svc -n $NAMESPACE
+        exit 1
 
     # ---------------- VERIFY ----------------
     - name: Health check
