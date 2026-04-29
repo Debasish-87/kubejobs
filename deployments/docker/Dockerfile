@@ -9,18 +9,18 @@ RUN go mod download
 
 COPY . .
 
+RUN ls -R /app
+
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -ldflags="-s -w" -o app ./cmd/server
+    go build -o app ./cmd/server
 
 
 FROM alpine:3.19
 
-WORKDIR /root/
-
 RUN apk add --no-cache ca-certificates
 
-COPY --from=builder /app/app .
+WORKDIR /root/
 
-EXPOSE 8080
+COPY --from=builder /app/app .
 
 CMD ["./app"]

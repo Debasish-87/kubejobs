@@ -14,6 +14,11 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    defaults:
+      run:
+        shell: bash
 
     steps:
     - uses: actions/checkout@v4
@@ -28,37 +33,43 @@ jobs:
 
     - name: Verify AWS
       run: |
-        set -e
+        set -euo pipefail
         aws sts get-caller-identity
         aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION
 
-    # ---------------- VERIFY kubectl (DO NOT INSTALL) ----------------
+    # ---------------- kubectl ----------------
     - name: Verify kubectl
       run: |
-        set -e
+        set -euo pipefail
         which kubectl
         kubectl version --client
 
     # ---------------- DOCKER ----------------
     - name: Login to ECR
       run: |
-        set -e
+        set -euo pipefail
         aws ecr get-login-password --region $AWS_REGION \
         | docker login --username AWS --password-stdin $ECR_REPO
 
     - name: Build & Push
       run: |
-        set -e
-        docker build -f deployments/docker/Dockerfile -t kubejobs:${{ github.sha }} .
-        docker tag kubejobs:${{ github.sha }} $ECR_REPO:${{ github.sha }}
-        docker tag kubejobs:${{ github.sha }} $ECR_REPO:latest
-        docker push $ECR_REPO:${{ github.sha }}
+        set -euo pipefail
+
+        IMAGE_TAG=${{ github.sha }}
+
+        docker build -f deployments/docker/Dockerfile -t kubejobs:$IMAGE_TAG .
+        docker tag kubejobs:$IMAGE_TAG $ECR_REPO:$IMAGE_TAG
+        docker tag kubejobs:$IMAGE_TAG $ECR_REPO:latest
+
+        docker push $ECR_REPO:$IMAGE_TAG
         docker push $ECR_REPO:latest
+
+        echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
 
     # ---------------- DEPLOY ----------------
     - name: Deploy to EKS
       run: |
-        set -e
+        set -euo pipefail
 
         echo "=== SETUP KUBECONFIG ==="
         aws eks update-kubeconfig \
@@ -69,7 +80,6 @@ jobs:
 
         echo "=== VERIFY CLUSTER ==="
         kubectl config current-context
-        kubectl cluster-info
         kubectl get nodes
 
         echo "=== APPLY BASE ==="
@@ -92,14 +102,14 @@ jobs:
         kubectl apply -f deployments/kubernetes/keda-scaledobject.yaml
 
         echo "=== UPDATE IMAGE ==="
-        kubectl set image deployment/api api=$ECR_REPO:${{ github.sha }} -n $NAMESPACE
-        kubectl set image deployment/worker worker=$ECR_REPO:${{ github.sha }} -n $NAMESPACE
+        kubectl set image deployment/api api=$ECR_REPO:$IMAGE_TAG -n $NAMESPACE
+        kubectl set image deployment/worker worker=$ECR_REPO:$IMAGE_TAG -n $NAMESPACE
 
-        echo "=== ROLLOUT ==="
+        echo "=== WAIT FOR ROLLOUT ==="
         kubectl rollout status deployment/api -n $NAMESPACE --timeout=180s
         kubectl rollout status deployment/worker -n $NAMESPACE --timeout=180s
 
-        echo "=== PODS ==="
+        echo "=== POD STATUS ==="
         kubectl get pods -n $NAMESPACE -o wide
 
         echo "=== WAIT FOR LOADBALANCER ==="
@@ -117,12 +127,12 @@ jobs:
     # ---------------- VERIFY ----------------
     - name: Health check
       run: |
-        set -e
+        set -euo pipefail
         curl -f $API_URL/health
 
     - name: Run tests
       run: |
-        set -e
+        set -euo pipefail
         chmod +x test.sh
         BASE_URL=$API_URL ./test.sh || true
 
@@ -131,7 +141,7 @@ jobs:
       if: failure()
       run: |
         export KUBECONFIG=$HOME/.kube/config
-        kubectl get pods -n $NAMESPACE || true
-        kubectl describe pods -n $NAMESPACE || true
+        kubectl get pods -n $NAMESPACE
+        kubectl describe pods -n $NAMESPACE
         kubectl logs -l app=api -n $NAMESPACE --tail=100 || true
         kubectl logs -l app=worker -n $NAMESPACE --tail=100 || true
