@@ -1,3 +1,6 @@
+################################################################
+FILE PATH: ./.github/workflows/deploy.yml
+################################################################
 name: KubeJobs Production Deploy
 
 on:
@@ -18,31 +21,22 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
     - uses: actions/checkout@v4
 
-    # ---------------- AWS AUTH ----------------
-    - name: Configure AWS
-      uses: aws-actions/configure-aws-credentials@v4
+    - uses: aws-actions/configure-aws-credentials@v4
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Verify AWS Identity
-      run: |
-        set -e
-        aws sts get-caller-identity
-        test -n "$AWS_REGION"
-        test -n "$CLUSTER_NAME"
+    - run: aws sts get-caller-identity
 
-    - name: Login to ECR
-      run: |
-        set -e
+    - run: |
         aws ecr get-login-password --region $AWS_REGION \
         | docker login --username AWS --password-stdin $ECR_REPO
 
-    - name: Build & Push Image
-      run: |
+    - run: |
         set -e
         docker build -f deployments/docker/Dockerfile -t kubejobs:${{ github.sha }} .
         docker tag kubejobs:${{ github.sha }} $ECR_REPO:${{ github.sha }}
@@ -50,86 +44,59 @@ jobs:
         docker push $ECR_REPO:${{ github.sha }}
         docker push $ECR_REPO:latest
 
-    - name: Configure kubeconfig
-      run: |
+    - run: |
         set -e
 
         aws eks describe-cluster \
           --name $CLUSTER_NAME \
           --region $AWS_REGION
 
-        mkdir -p $HOME/.kube
+        mkdir -p ~/.kube
 
         aws eks update-kubeconfig \
           --region $AWS_REGION \
           --name $CLUSTER_NAME
 
-        export KUBECONFIG=$HOME/.kube/config
-
-        echo "=== VERIFY CLUSTER ACCESS ==="
         kubectl config current-context
+
         kubectl cluster-info
+
         kubectl get nodes
 
-    - name: Apply base configs
-      run: |
-        set -e
-        export KUBECONFIG=$HOME/.kube/config
+    - run: |
+        kubectl get nodes || exit 1
 
+    - run: |
         kubectl apply -f deployments/kubernetes/namespace.yaml
         kubectl apply -f deployments/kubernetes/serviceaccount.yaml
         kubectl apply -f deployments/kubernetes/limit-range.yaml
         kubectl apply -f deployments/kubernetes/resource-quota.yaml
         kubectl apply -f deployments/kubernetes/network-policy.yaml
 
-    - name: Create secrets
-      run: |
-        set -e
-        export KUBECONFIG=$HOME/.kube/config
-
+    - run: |
         kubectl create secret generic app-config \
           --from-literal=REDIS_ADDR=rediss://master.kubejobs-redis.rw0frw.aps1.cache.amazonaws.com:6379 \
           -n $NAMESPACE \
           --dry-run=client -o yaml | kubectl apply -f -
 
-    - name: Deploy workloads
-      run: |
-        set -e
-        export KUBECONFIG=$HOME/.kube/config
-
+    - run: |
         kubectl apply -f deployments/kubernetes/api-deployment.yaml
         kubectl apply -f deployments/kubernetes/worker-deployment.yaml
         kubectl apply -f deployments/kubernetes/service.yaml
         kubectl apply -f deployments/kubernetes/keda-scaledobject.yaml
 
-    - name: Update images
-      run: |
-        set -e
-        export KUBECONFIG=$HOME/.kube/config
-
+    - run: |
         kubectl set image deployment/api api=$ECR_REPO:${{ github.sha }} -n $NAMESPACE
         kubectl set image deployment/worker worker=$ECR_REPO:${{ github.sha }} -n $NAMESPACE
 
-    - name: Wait for rollout
-      run: |
-        set -e
-        export KUBECONFIG=$HOME/.kube/config
-
+    - run: |
         kubectl rollout status deployment/api -n $NAMESPACE --timeout=180s
         kubectl rollout status deployment/worker -n $NAMESPACE --timeout=180s
 
-    - name: Debug pods
-      run: |
-        set -e
-        export KUBECONFIG=$HOME/.kube/config
-
+    - run: |
         kubectl get pods -n $NAMESPACE -o wide
 
-    - name: Get API URL
-      run: |
-        set -e
-        export KUBECONFIG=$HOME/.kube/config
-
+    - run: |
         for i in {1..40}; do
           HOST=$(kubectl get svc api -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
           if [ -n "$HOST" ]; then
@@ -138,26 +105,20 @@ jobs:
           fi
           sleep 10
         done
-
         kubectl get svc -n $NAMESPACE
         exit 1
 
-    - name: Health check
-      run: |
-        set -e
-        curl -f $API_URL/health
+    - run: curl -f $API_URL/health
 
-    - name: Run tests
-      run: |
-        set -e
+    - run: |
         chmod +x test.sh
         BASE_URL=$API_URL ./test.sh || true
 
-    - name: Dump logs on failure
-      if: failure()
+    - if: failure()
       run: |
-        export KUBECONFIG=$HOME/.kube/config
         kubectl get pods -n $NAMESPACE
         kubectl describe pods -n $NAMESPACE
         kubectl logs -l app=api -n $NAMESPACE --tail=100 || true
-        kubectl logs -l app=worker -n $NAMESPACE --tail=100 || true
+        kubectl logs -l app=worker -n $NAMESPACE --tail=100 || true-e 
+
+

@@ -2,7 +2,6 @@ groups:
   - name: kubejobs
     rules:
 
-      # Fire if no jobs have been processed in 5 minutes
       - alert: NoJobsProcessed
         expr: rate(jobs_processed_total[5m]) == 0
         for: 5m
@@ -11,7 +10,6 @@ groups:
         annotations:
           summary: "No jobs processed in 5 minutes"
 
-      # Fire if the DLQ is growing
       - alert: DLQGrowing
         expr: increase(jobs_failed_total[10m]) > 5
         for: 2m
@@ -20,7 +18,6 @@ groups:
         annotations:
           summary: "More than 5 jobs failed in the last 10 minutes"
 
-      # Fire if queue depth is too high (backlog)
       - alert: QueueDepthHigh
         expr: queue_depth{stream="jobs_stream"} > 500
         for: 2m
@@ -29,7 +26,6 @@ groups:
         annotations:
           summary: "Job queue depth over 500"
 
-      # Fire if a worker has gone quiet
       - alert: WorkerDown
         expr: worker_active == 0
         for: 1m

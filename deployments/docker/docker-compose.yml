@@ -1,11 +1,7 @@
 version: "3.9"
 
-# Load .env from the project root automatically.
-# Run with: docker compose --env-file ../../.env up
-
 services:
 
-  # ---------------- REDIS ----------------
   redis:
     image: redis:7
     command:
@@ -29,7 +25,6 @@ services:
       - kubejobs-net
 
 
-  # ---------------- API ----------------
   api:
     build:
       context: ../../
@@ -50,7 +45,6 @@ services:
       - kubejobs-net
 
 
-  # ---------------- WORKER ----------------
   worker:
     build:
       context: ../../
@@ -69,7 +63,6 @@ services:
       - kubejobs-net
 
 
-  # ---------------- PROMETHEUS ----------------
   prometheus:
     image: prom/prometheus
     volumes:
@@ -85,7 +78,6 @@ services:
       - kubejobs-net
 
 
-  # ---------------- GRAFANA ----------------
   grafana:
     image: grafana/grafana
     ports:
@@ -102,13 +94,11 @@ services:
       - kubejobs-net
 
 
-# ---------------- STORAGE ----------------
 volumes:
   redis_data:
   grafana_data:
 
 
-# ---------------- NETWORK ----------------
 networks:
   kubejobs-net:
     driver: bridge

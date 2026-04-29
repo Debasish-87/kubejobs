@@ -7,13 +7,11 @@ rule_files:
 
 scrape_configs:
 
-  # ---------------- API ----------------
   - job_name: "kubejobs-api"
     metrics_path: /metrics
     static_configs:
       - targets: ["api:8080"]
 
-  # ---------------- WORKER (auto-discovery via DNS) ----------------
   - job_name: "kubejobs-worker"
     metrics_path: /metrics
     dns_sd_configs:
@@ -25,7 +23,6 @@ scrape_configs:
       - source_labels: [__address__]
         target_label: instance
 
-  # ---------------- PROMETHEUS SELF ----------------
   - job_name: "prometheus"
     static_configs:
       - targets: ["localhost:9090"]
