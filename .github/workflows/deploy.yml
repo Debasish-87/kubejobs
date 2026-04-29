@@ -66,17 +66,25 @@ jobs:
 
         echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
 
-    # ---------------- DEPLOY ----------------
+    # ---------------- DEPLOY (CRITICAL FIXED BLOCK) ----------------
     - name: Deploy to EKS
       run: |
         set -euo pipefail
 
         echo "=== SETUP KUBECONFIG ==="
+
+        mkdir -p $HOME/.kube
+
         aws eks update-kubeconfig \
           --region $AWS_REGION \
-          --name $CLUSTER_NAME
+          --name $CLUSTER_NAME \
+          --kubeconfig $HOME/.kube/config
 
         export KUBECONFIG=$HOME/.kube/config
+
+        echo "=== VERIFY FILE ==="
+        ls -la $HOME/.kube
+        cat $HOME/.kube/config
 
         echo "=== VERIFY CLUSTER ==="
         kubectl config current-context
@@ -141,7 +149,7 @@ jobs:
       if: failure()
       run: |
         export KUBECONFIG=$HOME/.kube/config
-        kubectl get pods -n $NAMESPACE
-        kubectl describe pods -n $NAMESPACE
+        kubectl get pods -n $NAMESPACE || true
+        kubectl describe pods -n $NAMESPACE || true
         kubectl logs -l app=api -n $NAMESPACE --tail=100 || true
         kubectl logs -l app=worker -n $NAMESPACE --tail=100 || true
