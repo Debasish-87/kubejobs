@@ -32,13 +32,11 @@ jobs:
         aws sts get-caller-identity
         aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION
 
-    # ---------------- INSTALL kubectl ----------------
-    - name: Install kubectl
+    # ---------------- VERIFY kubectl (DO NOT INSTALL) ----------------
+    - name: Verify kubectl
       run: |
         set -e
-        curl -o kubectl https://s3.us-west-2.amazonaws.com/amazon-eks/1.28.0/2024-01-04/bin/linux/amd64/kubectl
-        chmod +x kubectl
-        sudo mv kubectl /usr/local/bin/
+        which kubectl
         kubectl version --client
 
     # ---------------- DOCKER ----------------
@@ -68,10 +66,6 @@ jobs:
           --name $CLUSTER_NAME
 
         export KUBECONFIG=$HOME/.kube/config
-
-        echo "=== DEBUG KUBECONFIG ==="
-        ls -la ~/.kube
-        cat ~/.kube/config | head -20
 
         echo "=== VERIFY CLUSTER ==="
         kubectl config current-context
