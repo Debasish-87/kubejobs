@@ -31,29 +31,64 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Verify AWS
+    - name: Verify AWS identity
       run: |
         set -euo pipefail
         aws sts get-caller-identity
-        aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION
+        aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION --query "cluster.status"
 
     # ---------------- INSTALL kubectl ----------------
-    - name: Install kubectl (fixed version)
+    - name: Install kubectl v1.28
       run: |
         set -euo pipefail
-        curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+        curl -sLO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
         chmod +x kubectl
-        sudo mv kubectl /usr/local/bin/
+        sudo mv kubectl /usr/local/bin/kubectl
         kubectl version --client
+
+    # ---------------- KUBECONFIG (set early, persist via GITHUB_ENV) ----------------
+    - name: Setup kubeconfig
+      run: |
+        set -euo pipefail
+        mkdir -p $HOME/.kube
+
+        aws eks update-kubeconfig \
+          --region $AWS_REGION \
+          --name $CLUSTER_NAME \
+          --kubeconfig $HOME/.kube/config
+
+        # Persist path for ALL subsequent steps
+        echo "KUBECONFIG=$HOME/.kube/config" >> $GITHUB_ENV
+
+        echo "=== Verify kubeconfig ==="
+        kubectl config current-context
+        kubectl get nodes
+
+    # ---------------- KEDA (install if not present) ----------------
+    - name: Install KEDA
+      run: |
+        set -euo pipefail
+
+        if kubectl get namespace keda &>/dev/null; then
+          echo "KEDA namespace already exists, checking deployment..."
+          kubectl rollout status deployment/keda-operator -n keda --timeout=60s || true
+        else
+          echo "Installing KEDA..."
+          kubectl apply --server-side -f https://github.com/kedacore/keda/releases/download/v2.14.0/keda-2.14.0.yaml
+
+          echo "Waiting for KEDA to be ready..."
+          kubectl rollout status deployment/keda-operator -n keda --timeout=120s
+          kubectl rollout status deployment/keda-metrics-apiserver -n keda --timeout=120s
+        fi
 
     # ---------------- DOCKER ----------------
     - name: Login to ECR
       run: |
         set -euo pipefail
         aws ecr get-login-password --region $AWS_REGION \
-        | docker login --username AWS --password-stdin $ECR_REPO
+          | docker login --username AWS --password-stdin $ECR_REPO
 
-    - name: Build & Push
+    - name: Build & Push image
       run: |
         set -euo pipefail
 
@@ -66,107 +101,127 @@ jobs:
         docker push $ECR_REPO:$IMAGE_TAG
         docker push $ECR_REPO:latest
 
+        # Persist for subsequent steps
         echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
 
-    # ---------------- KUBECONFIG ----------------
-    - name: Setup kubeconfig
-      run: |
-        set -euo pipefail
-
-        mkdir -p $HOME/.kube
-
-        aws eks update-kubeconfig \
-          --region $AWS_REGION \
-          --name $CLUSTER_NAME \
-          --kubeconfig $HOME/.kube/config
-
-        export KUBECONFIG=$HOME/.kube/config
-
-        echo "=== VERIFY KUBECONFIG ==="
-        test -f $KUBECONFIG
-        head -20 $KUBECONFIG
-
-        echo "=== VERIFY CLUSTER ==="
-        kubectl config current-context
-        kubectl get nodes
-
     # ---------------- DEPLOY ----------------
-    - name: Deploy to EKS
+    - name: Deploy base manifests
       run: |
         set -euo pipefail
-        export KUBECONFIG=$HOME/.kube/config
 
-        echo "=== APPLY BASE ==="
+        echo "=== Namespace & RBAC ==="
         kubectl apply -f deployments/kubernetes/namespace.yaml
         kubectl apply -f deployments/kubernetes/serviceaccount.yaml
+
+        echo "=== Resource controls ==="
         kubectl apply -f deployments/kubernetes/limit-range.yaml
         kubectl apply -f deployments/kubernetes/resource-quota.yaml
         kubectl apply -f deployments/kubernetes/network-policy.yaml
 
-        echo "=== SECRET ==="
+    - name: Sync app-config secret
+      run: |
+        set -euo pipefail
         kubectl create secret generic app-config \
           --from-literal=REDIS_ADDR=rediss://master.kubejobs-redis.rw0frw.aps1.cache.amazonaws.com:6379 \
           -n $NAMESPACE \
           --dry-run=client -o yaml | kubectl apply -f -
 
-        echo "=== DEPLOY ==="
+    - name: Apply workload manifests & update image
+      run: |
+        set -euo pipefail
+
+        echo "=== Deployments & Service ==="
         kubectl apply -f deployments/kubernetes/api-deployment.yaml
         kubectl apply -f deployments/kubernetes/worker-deployment.yaml
         kubectl apply -f deployments/kubernetes/service.yaml
-        kubectl apply -f deployments/kubernetes/keda-scaledobject.yaml
 
-        echo "=== UPDATE IMAGE ==="
-        kubectl set image deployment/api api=$ECR_REPO:$IMAGE_TAG -n $NAMESPACE
+        echo "=== Update image to $IMAGE_TAG ==="
+        kubectl set image deployment/api    api=$ECR_REPO:$IMAGE_TAG    -n $NAMESPACE
         kubectl set image deployment/worker worker=$ECR_REPO:$IMAGE_TAG -n $NAMESPACE
 
-        echo "=== WAIT FOR ROLLOUT ==="
-        kubectl rollout status deployment/api -n $NAMESPACE --timeout=180s || exit 1
-        kubectl rollout status deployment/worker -n $NAMESPACE --timeout=180s || exit 1
+        echo "=== KEDA ScaledObject ==="
+        kubectl apply -f deployments/kubernetes/keda-scaledobject.yaml
 
-        echo "=== POD STATUS ==="
+    - name: Wait for rollout
+      run: |
+        set -euo pipefail
+        kubectl rollout status deployment/api    -n $NAMESPACE --timeout=180s
+        kubectl rollout status deployment/worker -n $NAMESPACE --timeout=180s
+
+        echo "=== Pod status ==="
         kubectl get pods -n $NAMESPACE -o wide
 
     # ---------------- LOAD BALANCER ----------------
-    - name: Get API URL
+    - name: Wait for LoadBalancer hostname
       run: |
         set -euo pipefail
-        export KUBECONFIG=$HOME/.kube/config
 
-        FOUND=0
-        for i in {1..40}; do
-          HOST=$(kubectl get svc api -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+        echo "Waiting for LoadBalancer to get hostname (max 400s)..."
+        for i in $(seq 1 40); do
+          HOST=$(kubectl get svc api -n $NAMESPACE \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
           if [ -n "$HOST" ]; then
+            echo "LoadBalancer ready: $HOST"
             echo "API_URL=http://$HOST" >> $GITHUB_ENV
-            FOUND=1
-            break
+            exit 0
           fi
+          echo "  Attempt $i/40 — not ready yet, waiting 10s..."
           sleep 10
         done
 
-        if [ "$FOUND" -ne 1 ]; then
-          echo "LoadBalancer not ready"
-          kubectl get svc -n $NAMESPACE
-          exit 1
-        fi
+        echo "ERROR: LoadBalancer hostname not assigned after 400s"
+        kubectl get svc -n $NAMESPACE
+        exit 1
 
     # ---------------- VERIFY ----------------
-    - name: Health check
+    - name: Health check (with DNS propagation wait)
       run: |
         set -euo pipefail
-        curl -f $API_URL/health
 
-    - name: Run tests
+        echo "Waiting 30s for DNS propagation before health check..."
+        sleep 30
+
+        # Retry up to 10 times with 10s gap
+        for i in $(seq 1 10); do
+          if curl -sf --max-time 10 "$API_URL/health"; then
+            echo "Health check passed!"
+            exit 0
+          fi
+          echo "  Attempt $i/10 failed, retrying in 10s..."
+          sleep 10
+        done
+
+        echo "ERROR: Health check failed after all retries"
+        exit 1
+
+    - name: Run integration tests
       run: |
         set -euo pipefail
         chmod +x test.sh
         BASE_URL=$API_URL ./test.sh || true
 
-    # ---------------- DEBUG ----------------
+    # ---------------- DEBUG (only on failure) ----------------
     - name: Debug on failure
       if: failure()
       run: |
-        export KUBECONFIG=$HOME/.kube/config
-        kubectl get pods -n $NAMESPACE || true
+        echo "=== Nodes ==="
+        kubectl get nodes || true
+
+        echo "=== Pods ==="
+        kubectl get pods -n $NAMESPACE -o wide || true
+
+        echo "=== Pod events ==="
         kubectl describe pods -n $NAMESPACE || true
-        kubectl logs -l app=api -n $NAMESPACE --tail=100 || true
-        kubectl logs -l app=worker -n $NAMESPACE --tail=100 || true
+
+        echo "=== API logs ==="
+        kubectl logs -l app=api -n $NAMESPACE --tail=150 || true
+
+        echo "=== Worker logs ==="
+        kubectl logs -l app=worker -n $NAMESPACE --tail=150 || true
+
+        echo "=== Services ==="
+        kubectl get svc -n $NAMESPACE || true
+
+        echo "=== KEDA ==="
+        kubectl get scaledobject -n $NAMESPACE || true
+        kubectl describe scaledobject -n $NAMESPACE || true
