@@ -6,9 +6,10 @@ metadata:
   labels:
     app: worker
     component: backend
+    version: v2.0.0
 
 spec:
-  replicas: 3
+  replicas: 2
   revisionHistoryLimit: 3
 
   selector:
@@ -25,20 +26,21 @@ spec:
     metadata:
       labels:
         app: worker
-        component: backend
-
+        version: v2.0.0
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8081"
         prometheus.io/path: "/metrics"
 
     spec:
-      serviceAccountName: kubejobs-sa
       terminationGracePeriodSeconds: 60
 
       securityContext:
         fsGroup: 1000
         runAsNonRoot: true
+        # Required by PodSecurity restricted policy
+        seccompProfile:
+          type: RuntimeDefault
 
       containers:
         - name: worker
@@ -70,7 +72,7 @@ spec:
               value: "info"
 
             - name: WORKER_CONCURRENCY
-              value: "2"
+              value: "5"
 
             - name: WORKER_ID
               valueFrom:
@@ -79,13 +81,12 @@ spec:
 
           resources:
             requests:
-              cpu: "200m"
-              memory: "256Mi"
+              cpu: "100m"
+              memory: "128Mi"
             limits:
-              cpu: "500m"
+              cpu: "400m"   # ratio = 4 (limit-range max is 4)
               memory: "512Mi"
 
-          # ---------------- HEALTH ----------------
           startupProbe:
             httpGet:
               path: /health
@@ -102,12 +103,13 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 3
             failureThreshold: 3
+            successThreshold: 1
 
           livenessProbe:
             httpGet:
               path: /health
               port: 8081
-            initialDelaySeconds: 20
+            initialDelaySeconds: 15
             periodSeconds: 15
             timeoutSeconds: 3
             failureThreshold: 5
@@ -115,9 +117,8 @@ spec:
           lifecycle:
             preStop:
               exec:
-                command: ["sh", "-c", "sleep 20"]
+                command: ["sh", "-c", "sleep 15"]
 
-          # ---------------- SECURITY ----------------
           securityContext:
             runAsNonRoot: true
             runAsUser: 1000
@@ -126,6 +127,9 @@ spec:
             capabilities:
               drop:
                 - ALL
+            # Required by PodSecurity restricted policy
+            seccompProfile:
+              type: RuntimeDefault
 
       topologySpreadConstraints:
         - maxSkew: 1
